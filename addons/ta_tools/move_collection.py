@@ -1,9 +1,9 @@
 bl_info = {
     "name": "Quick Collection Move",
     "author": "OpenAI",
-    "version": (1, 4, 0),
+    "version": (1, 4, 3),
     "blender": (4, 0, 0),
-    "location": "View3D > Sidebar > Item > Quick Collection Move",
+    "location": "Properties > Object > Quick Collection Move",
     "description": "Quickly move/link selected objects to scene collections from a compact panel",
     "category": "Object",
 }
@@ -81,6 +81,41 @@ def ensure_object_in_at_least_one_collection(obj, fallback_collection):
         fallback_collection.objects.link(obj)
 
 
+def get_layer_collection_path(view_layer, collection_path):
+    path_parts = collection_path.split("/")
+    layer_collection = view_layer.layer_collection
+
+    if not path_parts or path_parts[0] != layer_collection.collection.name:
+        return []
+
+    result = [layer_collection]
+    for collection_name in path_parts[1:]:
+        layer_collection = next(
+            (
+                child
+                for child in layer_collection.children
+                if child.collection.name == collection_name
+            ),
+            None,
+        )
+        if layer_collection is None:
+            return []
+        result.append(layer_collection)
+
+    return result
+
+
+def ensure_collection_path_in_view_layer(view_layer, collection_path):
+    layer_collections = get_layer_collection_path(view_layer, collection_path)
+    if not layer_collections:
+        return False
+
+    for layer_collection in layer_collections:
+        layer_collection.exclude = False
+
+    return True
+
+
 def filter_match(text, keyword):
     if not keyword:
         return True
@@ -127,6 +162,13 @@ class OBJECT_OT_qcm_move_to_collection(Operator):
 
         if target is None:
             self.report({"ERROR"}, f"Collection path not found: {self.collection_path}")
+            return {"CANCELLED"}
+
+        if not ensure_collection_path_in_view_layer(context.view_layer, self.collection_path):
+            self.report(
+                {"ERROR"},
+                f"Collection is not available in the current View Layer: {self.collection_path}"
+            )
             return {"CANCELLED"}
 
         objs = get_selected_objects(context)
@@ -177,6 +219,13 @@ class OBJECT_OT_qcm_link_to_collection(Operator):
 
         if target is None:
             self.report({"ERROR"}, f"Collection path not found: {self.collection_path}")
+            return {"CANCELLED"}
+
+        if not ensure_collection_path_in_view_layer(context.view_layer, self.collection_path):
+            self.report(
+                {"ERROR"},
+                f"Collection is not available in the current View Layer: {self.collection_path}"
+            )
             return {"CANCELLED"}
 
         objs = get_selected_objects(context)
@@ -248,12 +297,12 @@ class OBJECT_OT_qcm_unlink_from_collection(Operator):
 # UI
 # ---------------------------------------------------
 
-class VIEW3D_PT_qcm_panel(Panel):
+class OBJECT_PT_qcm_panel(Panel):
     bl_label = "Quick Collection Move"
-    bl_idname = "VIEW3D_PT_qcm_panel"
-    bl_space_type = "VIEW_3D"
-    bl_region_type = "UI"
-    bl_category = "Item"
+    bl_idname = "OBJECT_PT_qcm_panel"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "object"
 
     @classmethod
     def poll(cls, context):
@@ -370,7 +419,7 @@ classes = (
     OBJECT_OT_qcm_move_to_collection,
     OBJECT_OT_qcm_link_to_collection,
     OBJECT_OT_qcm_unlink_from_collection,
-    VIEW3D_PT_qcm_panel,
+    OBJECT_PT_qcm_panel,
 )
 
 

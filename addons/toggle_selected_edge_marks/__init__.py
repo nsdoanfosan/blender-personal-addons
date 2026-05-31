@@ -326,32 +326,32 @@ class TOGGLE_EDGE_MARKS_AddonPreferences(bpy.types.AddonPreferences):
     seam_key: EnumProperty(
         name="Key",
         items=KEY_ITEMS,
-        default='S',
+        default='B',
         update=update_keymaps
     )
-    seam_ctrl: BoolProperty(name="Ctrl", default=True, update=update_keymaps)
-    seam_alt: BoolProperty(name="Alt", default=True, update=update_keymaps)
-    seam_shift: BoolProperty(name="Shift", default=False, update=update_keymaps)
+    seam_ctrl: BoolProperty(name="Ctrl", default=False, update=update_keymaps)
+    seam_alt: BoolProperty(name="Alt", default=False, update=update_keymaps)
+    seam_shift: BoolProperty(name="Shift", default=True, update=update_keymaps)
 
     bevel_key: EnumProperty(
         name="Key",
         items=KEY_ITEMS,
-        default='B',
+        default='C',
         update=update_keymaps
     )
-    bevel_ctrl: BoolProperty(name="Ctrl", default=True, update=update_keymaps)
-    bevel_alt: BoolProperty(name="Alt", default=True, update=update_keymaps)
-    bevel_shift: BoolProperty(name="Shift", default=False, update=update_keymaps)
+    bevel_ctrl: BoolProperty(name="Ctrl", default=False, update=update_keymaps)
+    bevel_alt: BoolProperty(name="Alt", default=False, update=update_keymaps)
+    bevel_shift: BoolProperty(name="Shift", default=True, update=update_keymaps)
 
     sharp_key: EnumProperty(
         name="Key",
         items=KEY_ITEMS,
-        default='H',
+        default='V',
         update=update_keymaps
     )
-    sharp_ctrl: BoolProperty(name="Ctrl", default=True, update=update_keymaps)
-    sharp_alt: BoolProperty(name="Alt", default=True, update=update_keymaps)
-    sharp_shift: BoolProperty(name="Shift", default=False, update=update_keymaps)
+    sharp_ctrl: BoolProperty(name="Ctrl", default=False, update=update_keymaps)
+    sharp_alt: BoolProperty(name="Alt", default=False, update=update_keymaps)
+    sharp_shift: BoolProperty(name="Shift", default=True, update=update_keymaps)
 
     def draw_hotkey_row(self, layout, title, key_prop, ctrl_prop, alt_prop, shift_prop):
         box = layout.box()

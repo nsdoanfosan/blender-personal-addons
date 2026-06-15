@@ -11,6 +11,7 @@ $packages = @(
     "ta_tools",
     "ta_uv_tools",
     "align_object",
+    "alpha_image_to_mesh",
     "toggle_selected_edge_marks",
     "xyz_transform_gizmo_overlay_stable"
 )

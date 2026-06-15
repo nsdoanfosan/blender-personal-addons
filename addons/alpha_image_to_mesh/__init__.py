@@ -1,9 +1,9 @@
 bl_info = {
     "name": "Alpha Image To Mesh",
     "author": "Codex",
-    "version": (1, 2, 0),
+    "version": (1, 2, 1),
     "blender": (3, 6, 0),
-    "location": "Object > Alpha Mesh From Base Color",
+    "location": "View3D > Sidebar > TA > Alpha Mesh",
     "description": "Create a mesh from the alpha channel of a selected plane's Base Color image.",
     "category": "Object",
 }
@@ -538,7 +538,38 @@ def menu_func_object(self, context):
     self.layout.operator(OBJECT_OT_alpha_mesh_from_base_color.bl_idname, text="Alpha Mesh From Base Color")
 
 
-classes = (OBJECT_OT_alpha_mesh_from_base_color,)
+class VIEW3D_PT_alpha_mesh_from_base_color(bpy.types.Panel):
+    bl_label = "Alpha Mesh"
+    bl_idname = "VIEW3D_PT_alpha_mesh_from_base_color"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "TA"
+
+    def draw(self, context):
+        layout = self.layout
+        obj = context.object
+
+        if obj is None:
+            layout.label(text="Select a plane with an image material.", icon="INFO")
+            return
+
+        image, _material = _find_base_color_image(obj) if obj.type == "MESH" else (None, None)
+        row = layout.row()
+        row.enabled = obj.type == "MESH" and image is not None
+        row.operator(OBJECT_OT_alpha_mesh_from_base_color.bl_idname, icon="MOD_TRIANGULATE")
+
+        if obj.type != "MESH":
+            layout.label(text="Active object is not a mesh.", icon="ERROR")
+        elif image is None:
+            layout.label(text="No Base Color image found.", icon="ERROR")
+        else:
+            layout.label(text=f"Image: {image.name}", icon="IMAGE_DATA")
+
+
+classes = (
+    OBJECT_OT_alpha_mesh_from_base_color,
+    VIEW3D_PT_alpha_mesh_from_base_color,
+)
 
 
 def register():

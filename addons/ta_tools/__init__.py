@@ -9,6 +9,7 @@ bl_info = {
 }
 
 from . import export_collections
+from . import curve_fit_plane
 from . import linked_object
 from . import move_collection
 from . import rename_objects
@@ -18,6 +19,7 @@ from . import ta_tool
 
 modules = (
     export_collections,
+    curve_fit_plane,
     linked_object,
     move_collection,
     rename_objects,

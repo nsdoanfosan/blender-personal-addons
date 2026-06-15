@@ -3,7 +3,7 @@ bl_info = {
     "author":      "YourName",
     "version":     (1, 1, 0),
     "blender":     (3, 0, 0),
-    "location":    "View3D > Sidebar > TA Tools",
+    "location":    "View3D > Sidebar > TA",
     "description": "Exports every direct child collection (and all nested sub-collections) "
                    "to individual FBX files with fixed settings.",
     "category":    "Import-Export",
@@ -96,14 +96,14 @@ class OBJECT_OT_export_fbx_child_collections_fixed(Operator):
 
 
 # ─────────────────────────────────────────────────────────────
-# 4) UI 패널 (N 패널 > TA Tools)
+# 4) UI 패널 (N 패널 > TA)
 # ─────────────────────────────────────────────────────────────
 class OBJECT_PT_ta_fbx_export_panel(Panel):
     bl_label       = "Collection FBX Exporter"
     bl_idname      = "OBJECT_PT_ta_fbx_export_panel"
     bl_space_type  = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category    = 'TA Tools'
+    bl_category    = 'TA'
 
     def draw(self, context):
         layout   = self.layout

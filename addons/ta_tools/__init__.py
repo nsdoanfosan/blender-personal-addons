@@ -9,6 +9,7 @@ bl_info = {
 }
 
 from . import export_collections
+from . import alpha_image_to_mesh
 from . import curve_fit_plane
 from . import linked_object
 from . import move_collection
@@ -19,6 +20,7 @@ from . import ta_tool
 
 modules = (
     export_collections,
+    alpha_image_to_mesh,
     curve_fit_plane,
     linked_object,
     move_collection,

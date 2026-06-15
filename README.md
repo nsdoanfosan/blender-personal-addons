@@ -6,11 +6,9 @@ junctions.
 ## Packages
 
 - `addons/ta_tools`: collection export, linked object, collection move, rename,
-  and mesh utility tools.
+  alpha image silhouette mesh, and mesh utility tools.
 - `addons/ta_uv_tools`: UV fit and 90 degree rotation tools.
 - `addons/align_object`: clicked-object alignment tool.
-- `addons/alpha_image_to_mesh`: creates a smoothed silhouette mesh from the
-  alpha channel of a selected plane's Base Color image.
 - `addons/toggle_selected_edge_marks`: seam, bevel weight, and sharp toggles.
 - `addons/xyz_transform_gizmo_overlay_stable`: viewport transform overlay.
 - `vendor`: third-party source snapshots. These are not deployed by the script.

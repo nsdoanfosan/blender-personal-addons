@@ -1,12 +1,3 @@
-bl_info = {
-    "name": "UV / Viewport Rotate 90 Hotkeys",
-    "author": "ChatGPT",
-    "version": (1, 1, 0),
-    "blender": (4, 0, 0),
-    "description": "Rotate selected UVs or 3D selection by 90 degrees with Ctrl + Arrow keys",
-    "category": "UV",
-}
-
 import bpy
 import bmesh
 import math

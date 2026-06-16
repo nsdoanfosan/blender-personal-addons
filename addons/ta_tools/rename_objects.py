@@ -1,14 +1,6 @@
 import bpy
 from bpy.types import Operator
 
-bl_info = {
-    "name": "Rename Objects",
-    "author": "PARK",
-    "version": (1, 0, 1),
-    "blender": (4, 0, 0),
-    "description": "Rename one or more selected objects",
-    "category": "Object",
-}
 
 class Object_OT_RenameObjects(Operator):
     bl_idname = "object.renameobjects"

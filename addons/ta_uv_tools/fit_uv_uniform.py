@@ -1,11 +1,3 @@
-bl_info = {
-    "name": "Fit Selected UV Uniform to U 0-1",
-    "author": "ChatGPT",
-    "version": (1, 0, 7),
-    "blender": (5, 0, 0),
-    "category": "UV",
-}
-
 import bpy
 import bmesh
 

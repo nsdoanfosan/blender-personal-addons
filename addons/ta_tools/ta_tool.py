@@ -1,13 +1,3 @@
-bl_info = {
-    "name": "TA Utility Pack",
-    "author": "ChatGPT TA",
-    "version": (1, 1, 0),
-    "blender": (4, 0, 0),
-    "location": "View3D ▸ Sidebar ▸ TA",
-    "description": "Quick tools: Vertex setup + Max-style Connect Edge",
-    "category": "Mesh",
-}
-
 import bpy
 import bmesh
 

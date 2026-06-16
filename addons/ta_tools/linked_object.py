@@ -1,13 +1,3 @@
-bl_info = {
-    "name": "Linked Data Info Panel",
-    "author": "OpenAI",
-    "version": (1, 3, 0),
-    "blender": (4, 0, 0),
-    "location": "View3D > Sidebar > Item",
-    "description": "Show objects sharing the same object data and select them",
-    "category": "3D View",
-}
-
 import bpy
 from bpy.props import StringProperty
 

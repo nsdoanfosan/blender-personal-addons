@@ -1,13 +1,3 @@
-bl_info = {
-    "name": "Quick Collection Move",
-    "author": "OpenAI",
-    "version": (1, 4, 3),
-    "blender": (4, 0, 0),
-    "location": "Properties > Object > Quick Collection Move",
-    "description": "Quickly move/link selected objects to scene collections from a compact panel",
-    "category": "Object",
-}
-
 import bpy
 from bpy.types import Operator, Panel, PropertyGroup
 from bpy.props import StringProperty, PointerProperty, BoolProperty

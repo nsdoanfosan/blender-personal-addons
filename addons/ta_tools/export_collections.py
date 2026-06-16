@@ -1,14 +1,3 @@
-bl_info = {
-    "name":        "Collection FBX Exporter",
-    "author":      "YourName",
-    "version":     (1, 1, 0),
-    "blender":     (3, 0, 0),
-    "location":    "View3D > Sidebar > TA",
-    "description": "Exports every direct child collection (and all nested sub-collections) "
-                   "to individual FBX files with fixed settings.",
-    "category":    "Import-Export",
-}
-
 import bpy
 import os
 from bpy.props import StringProperty, PointerProperty

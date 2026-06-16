@@ -1,20 +1,8 @@
-bl_info = {
-    "name": "Alpha Safe Outline",
-    "author": "Codex",
-    "version": (1, 2, 1),
-    "blender": (3, 6, 0),
-    "location": "View3D > Sidebar > TA > Alpha Mesh",
-    "description": "Create a bevel-safe outline from the alpha channel of a selected plane's Base Color image.",
-    "category": "Object",
-}
-
 import math
 from collections import defaultdict
 
 import bpy
-from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty
-from mathutils import Vector
-from mathutils.geometry import tessellate_polygon
+from bpy.props import BoolProperty, FloatProperty, IntProperty
 
 
 def _signed_area(points):
@@ -266,70 +254,6 @@ def _trace_alpha_contours(alpha_grid, threshold):
     return _trace_segments_to_loops(segments)
 
 
-def _disk_offsets(radius):
-    radius = int(max(0, radius))
-    if radius <= 0:
-        return [(0, 0)]
-    radius_sq = radius * radius
-    return [
-        (dx, dy)
-        for dy in range(-radius, radius + 1)
-        for dx in range(-radius, radius + 1)
-        if dx * dx + dy * dy <= radius_sq
-    ]
-
-
-def _dilate_mask(mask, radius):
-    offsets = _disk_offsets(radius)
-    height = len(mask)
-    width = len(mask[0]) if height else 0
-    result = [[False] * width for _ in range(height)]
-
-    for y in range(height):
-        for x in range(width):
-            if not mask[y][x]:
-                continue
-            for dx, dy in offsets:
-                nx = x + dx
-                ny = y + dy
-                if 0 <= nx < width and 0 <= ny < height:
-                    result[ny][nx] = True
-    return result
-
-
-def _erode_mask(mask, radius):
-    offsets = _disk_offsets(radius)
-    height = len(mask)
-    width = len(mask[0]) if height else 0
-    result = [[False] * width for _ in range(height)]
-
-    for y in range(height):
-        for x in range(width):
-            keep = True
-            for dx, dy in offsets:
-                nx = x + dx
-                ny = y + dy
-                if nx < 0 or nx >= width or ny < 0 or ny >= height or not mask[ny][nx]:
-                    keep = False
-                    break
-            result[y][x] = keep
-    return result
-
-
-def _process_alpha_grid_for_safe_outline(alpha_grid, threshold, cleanup_radius, padding_radius):
-    if cleanup_radius <= 0 and padding_radius <= 0:
-        return alpha_grid
-
-    mask = [[value >= threshold for value in row] for row in alpha_grid]
-    if cleanup_radius > 0:
-        # Closing removes narrow dents; opening removes tiny islands and peninsulas.
-        mask = _erode_mask(_dilate_mask(mask, cleanup_radius), cleanup_radius)
-        mask = _dilate_mask(_erode_mask(mask, cleanup_radius), cleanup_radius)
-    if padding_radius > 0:
-        mask = _dilate_mask(mask, padding_radius)
-    return [[1.0 if value else 0.0 for value in row] for row in mask]
-
-
 def _smooth_loop(points, iterations):
     smoothed = points
     for _ in range(iterations):
@@ -346,6 +270,21 @@ def _smooth_loop(points, iterations):
             )
         smoothed = next_points
     return smoothed
+
+
+def _assign_planar_uvs(mesh, x_min, x_max, y_min, y_max):
+    width = max(x_max - x_min, 1.0e-9)
+    height = max(y_max - y_min, 1.0e-9)
+    uv_layer = mesh.uv_layers.new(name="UVMap")
+
+    for polygon in mesh.polygons:
+        for loop_index in polygon.loop_indices:
+            vertex_index = mesh.loops[loop_index].vertex_index
+            co = mesh.vertices[vertex_index].co
+            uv_layer.data[loop_index].uv = (
+                (co.x - x_min) / width,
+                (co.y - y_min) / height,
+            )
 
 
 def _build_mesh_from_loops(
@@ -398,135 +337,16 @@ def _build_mesh_from_loops(
         if _signed_area(outer_points) < 0.0:
             outer_points = list(reversed(outer_points))
 
-        group = [outer_points]
-        for hole in holes:
-            first_point = hole["points"][0]
-            if _point_in_polygon(first_point, outer_points):
-                hole_points = hole["points"]
-                if _signed_area(hole_points) > 0.0:
-                    hole_points = list(reversed(hole_points))
-                group.append(hole_points)
-
         base_index = len(vertices)
-        group_vectors = []
-        for polygon in group:
-            poly_vectors = [Vector((x, y, 0.0)) for x, y in polygon]
-            group_vectors.append(poly_vectors)
-            vertices.extend((vector.x, vector.y, vector.z) for vector in poly_vectors)
-
-        triangles = tessellate_polygon(group_vectors)
-        faces.extend(tuple(base_index + index for index in triangle) for triangle in triangles)
+        vertices.extend((x, y, 0.0) for x, y in outer_points)
+        faces.append(tuple(range(base_index, base_index + len(outer_points))))
 
     mesh = bpy.data.meshes.new("Alpha_Image_Mesh")
     mesh.from_pydata(vertices, [], faces)
     mesh.update()
+    _assign_planar_uvs(mesh, x_min, x_max, y_min, y_max)
+    mesh.update()
     return mesh, len(outers), len(holes), len(vertices), len(faces)
-
-
-def _convert_loops_to_world(
-    loops,
-    image_width,
-    image_height,
-    sample_stride,
-    x_min,
-    x_max,
-    y_min,
-    y_max,
-    simplify_epsilon,
-    smooth_iterations,
-    min_area,
-):
-    x_scale = (x_max - x_min) / max(1.0, image_width / sample_stride)
-    y_scale = (y_max - y_min) / max(1.0, image_height / sample_stride)
-    simplify_pixels = simplify_epsilon / max(abs(x_scale), abs(y_scale), 1.0e-9)
-    converted = []
-
-    for loop in loops:
-        simplified = _simplify_closed_loop(loop, simplify_pixels)
-        simplified = _smooth_loop(simplified, smooth_iterations)
-        world_loop = [
-            (x_min + point[0] * x_scale, y_min + point[1] * y_scale)
-            for point in simplified
-        ]
-        area = _signed_area(world_loop)
-        if abs(area) >= min_area:
-            converted.append({"points": world_loop, "area": area})
-
-    for loop in converted:
-        point = loop["points"][0]
-        loop["depth"] = sum(
-            1
-            for other in converted
-            if other is not loop
-            and abs(other["area"]) > abs(loop["area"])
-            and _point_in_polygon(point, other["points"])
-        )
-    return converted
-
-
-def _build_curve_from_loops(
-    loops,
-    image_width,
-    image_height,
-    sample_stride,
-    x_min,
-    x_max,
-    y_min,
-    y_max,
-    simplify_epsilon,
-    smooth_iterations,
-    min_area,
-    extrude,
-    bevel_depth,
-    resolution,
-):
-    converted = _convert_loops_to_world(
-        loops,
-        image_width,
-        image_height,
-        sample_stride,
-        x_min,
-        x_max,
-        y_min,
-        y_max,
-        simplify_epsilon,
-        smooth_iterations,
-        min_area,
-    )
-    if not converted:
-        raise ValueError("No usable contour loops were generated.")
-
-    curve = bpy.data.curves.new("Alpha_Safe_Outline", "CURVE")
-    curve.dimensions = "2D"
-    curve.fill_mode = "BOTH"
-    curve.resolution_u = resolution
-    curve.render_resolution_u = resolution
-    curve.extrude = extrude * 0.5
-    curve.bevel_depth = bevel_depth
-    curve.bevel_resolution = max(1, min(8, resolution))
-    curve.use_fill_caps = True
-
-    for loop in converted:
-        points = loop["points"]
-        if len(points) < 3:
-            continue
-
-        is_hole = loop["depth"] % 2 == 1
-        area = _signed_area(points)
-        if is_hole and area > 0.0:
-            points = list(reversed(points))
-        elif not is_hole and area < 0.0:
-            points = list(reversed(points))
-
-        spline = curve.splines.new("POLY")
-        spline.points.add(len(points) - 1)
-        spline.use_cyclic_u = True
-        for point, co in zip(spline.points, points):
-            point.co = (co[0], co[1], 0.0, 1.0)
-
-    return curve, len([loop for loop in converted if loop["depth"] % 2 == 0]), len(
-        [loop for loop in converted if loop["depth"] % 2 == 1]
-    ), sum(len(loop["points"]) for loop in converted), len(curve.splines)
 
 
 def _find_upstream_image(socket, visited=None):
@@ -583,18 +403,9 @@ def _plane_xy_bounds(obj):
 
 class OBJECT_OT_ta_alpha_mesh_from_base_color(bpy.types.Operator):
     bl_idname = "object.ta_alpha_mesh_from_base_color"
-    bl_label = "Alpha Safe Outline From Base Color"
+    bl_label = "Alpha Mesh From Base Color"
     bl_options = {"REGISTER", "UNDO"}
 
-    output_mode: EnumProperty(
-        name="Output",
-        description="Curve output is safer for shell/extrude/bevel workflows",
-        default="CURVE",
-        items=(
-            ("CURVE", "Bevel Safe Curve", "Create a 2D filled curve with clean outline, extrusion, and bevel"),
-            ("MESH", "Raw Mesh", "Create a triangulated mesh from the alpha silhouette"),
-        ),
-    )
     alpha_threshold: FloatProperty(
         name="Alpha Threshold",
         description="Pixels at or above this alpha value become solid",
@@ -618,21 +429,9 @@ class OBJECT_OT_ta_alpha_mesh_from_base_color(bpy.types.Operator):
     smooth_iterations: IntProperty(
         name="Smooth Passes",
         description="Chaikin smoothing passes applied to the traced contour",
-        default=2,
+        default=1,
         min=0,
         max=5,
-    )
-    safe_radius: FloatProperty(
-        name="Safe Radius",
-        description="Local-space radius used to remove details too small for beveling",
-        default=0.02,
-        min=0.0,
-    )
-    outline_padding: FloatProperty(
-        name="Outline Padding",
-        description="Local-space outward padding added before tracing the final contour",
-        default=0.03,
-        min=0.0,
     )
     min_area: FloatProperty(
         name="Minimum Area",
@@ -642,22 +441,9 @@ class OBJECT_OT_ta_alpha_mesh_from_base_color(bpy.types.Operator):
     )
     extrusion: FloatProperty(
         name="Extrusion",
-        description="Curve extrusion thickness or optional Solidify thickness for raw mesh",
-        default=0.04,
+        description="Optional Solidify thickness after import",
+        default=0.0,
         min=0.0,
-    )
-    bevel_depth: FloatProperty(
-        name="Bevel Depth",
-        description="Curve bevel radius for the generated bevel-safe outline",
-        default=0.008,
-        min=0.0,
-    )
-    curve_resolution: IntProperty(
-        name="Curve Resolution",
-        description="Curve bevel and viewport resolution",
-        default=3,
-        min=1,
-        max=8,
     )
     copy_material: BoolProperty(
         name="Copy Material",
@@ -686,62 +472,31 @@ class OBJECT_OT_ta_alpha_mesh_from_base_color(bpy.types.Operator):
                 image,
                 self.max_dimension,
             )
-            x_min, x_max, y_min, y_max = _plane_xy_bounds(source_obj)
-            pixel_size = max(
-                abs(x_max - x_min) / max(1.0, width / stride),
-                abs(y_max - y_min) / max(1.0, height / stride),
-            )
-            cleanup_pixels = int(round(self.safe_radius / max(pixel_size, 1.0e-9)))
-            padding_pixels = int(round(self.outline_padding / max(pixel_size, 1.0e-9)))
-            alpha_grid = _process_alpha_grid_for_safe_outline(
-                alpha_grid,
-                self.alpha_threshold,
-                cleanup_pixels,
-                padding_pixels,
-            )
             loops = _trace_alpha_contours(alpha_grid, self.alpha_threshold)
             if not loops:
                 self.report({"ERROR"}, "No alpha silhouette was found.")
                 return {"CANCELLED"}
 
-            name = source_obj.name
-            if self.output_mode == "CURVE":
-                curve, outer_count, hole_count, vertex_count, face_count = _build_curve_from_loops(
-                    loops,
-                    width,
-                    height,
-                    stride,
-                    x_min,
-                    x_max,
-                    y_min,
-                    y_max,
-                    self.simplify_epsilon,
-                    self.smooth_iterations,
-                    self.min_area,
-                    self.extrusion,
-                    self.bevel_depth,
-                    self.curve_resolution,
-                )
-                obj = bpy.data.objects.new(f"{name}_safe_outline", curve)
-            else:
-                mesh, outer_count, hole_count, vertex_count, face_count = _build_mesh_from_loops(
-                    loops,
-                    width,
-                    height,
-                    stride,
-                    x_min,
-                    x_max,
-                    y_min,
-                    y_max,
-                    self.simplify_epsilon,
-                    self.smooth_iterations,
-                    self.min_area,
-                )
-                if not face_count:
-                    self.report({"ERROR"}, "The traced silhouette could not be tessellated.")
-                    return {"CANCELLED"}
-                obj = bpy.data.objects.new(f"{name}_alpha_mesh", mesh)
+            x_min, x_max, y_min, y_max = _plane_xy_bounds(source_obj)
+            mesh, outer_count, hole_count, vertex_count, face_count = _build_mesh_from_loops(
+                loops,
+                width,
+                height,
+                stride,
+                x_min,
+                x_max,
+                y_min,
+                y_max,
+                self.simplify_epsilon,
+                self.smooth_iterations,
+                self.min_area,
+            )
+            if not face_count:
+                self.report({"ERROR"}, "The traced silhouette could not create n-gon faces.")
+                return {"CANCELLED"}
 
+            name = source_obj.name
+            obj = bpy.data.objects.new(f"{name}_alpha_mesh", mesh)
             context.collection.objects.link(obj)
             obj.matrix_world = source_obj.matrix_world
             if self.copy_material and material:
@@ -750,7 +505,7 @@ class OBJECT_OT_ta_alpha_mesh_from_base_color(bpy.types.Operator):
             source_obj.select_set(False)
             obj.select_set(True)
 
-            if self.output_mode == "MESH" and self.extrusion > 0.0:
+            if self.extrusion > 0.0:
                 solidify = obj.modifiers.new("Alpha Thickness", "SOLIDIFY")
                 solidify.thickness = self.extrusion
                 solidify.offset = 0.0
@@ -760,8 +515,8 @@ class OBJECT_OT_ta_alpha_mesh_from_base_color(bpy.types.Operator):
 
             self.report(
                 {"INFO"},
-                f"Created alpha outline from {image.name}: {outer_count} islands, {hole_count} holes, "
-                f"{vertex_count} vertices, {face_count} elements.",
+                f"Created alpha n-gon mesh from {image.name}: {outer_count} islands, "
+                f"{hole_count} ignored holes, {vertex_count} vertices, {face_count} faces.",
             )
             return {"FINISHED"}
         except Exception as exc:
@@ -770,11 +525,11 @@ class OBJECT_OT_ta_alpha_mesh_from_base_color(bpy.types.Operator):
 
 
 def menu_func_object(self, context):
-    self.layout.operator(OBJECT_OT_ta_alpha_mesh_from_base_color.bl_idname, text="Alpha Safe Outline From Base Color")
+    self.layout.operator(OBJECT_OT_ta_alpha_mesh_from_base_color.bl_idname, text="Alpha Mesh From Base Color")
 
 
 class TA_PT_alpha_mesh_from_base_color(bpy.types.Panel):
-    bl_label = "Alpha Safe Outline"
+    bl_label = "Alpha Mesh"
     bl_idname = "TA_PT_alpha_mesh_from_base_color"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -791,7 +546,7 @@ class TA_PT_alpha_mesh_from_base_color(bpy.types.Panel):
         image, _material = _find_base_color_image(obj) if obj.type == "MESH" else (None, None)
         row = layout.row()
         row.enabled = obj.type == "MESH" and image is not None
-        row.operator(OBJECT_OT_ta_alpha_mesh_from_base_color.bl_idname, icon="MOD_BEVEL")
+        row.operator(OBJECT_OT_ta_alpha_mesh_from_base_color.bl_idname, icon="MOD_TRIANGULATE")
 
         if obj.type != "MESH":
             layout.label(text="Active object is not a mesh.", icon="ERROR")

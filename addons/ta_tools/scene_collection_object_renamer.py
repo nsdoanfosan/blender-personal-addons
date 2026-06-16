@@ -1,13 +1,3 @@
-bl_info = {
-    "name": "Scene Collection Object Renamer",
-    "author": "ChatGPT",
-    "version": (1, 3, 0),
-    "blender": (4, 0, 0),
-    "location": "View3D > Sidebar > Rename Tools",
-    "description": "Rename all objects in scene collections based on their collection names, excluding Export collection traversal",
-    "category": "Object",
-}
-
 import bpy
 import uuid
 

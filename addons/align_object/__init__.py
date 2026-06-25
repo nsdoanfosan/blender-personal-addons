@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Move Each Selected Object To Clicked Object - Alt A",
     "author": "ChatGPT",
-    "version": (1, 6, 0),
+    "version": (1, 7, 0),
     "blender": (4, 0, 0),
     "category": "Object",
 }
@@ -372,8 +372,200 @@ class OBJECT_OT_move_each_selected_to_clicked_object(bpy.types.Operator):
                 area.tag_redraw()
 
 
+def _orthogonal_fallback_axis(normal):
+    if abs(normal.z) < 0.9:
+        return Vector((0.0, 0.0, 1.0))
+
+    return Vector((1.0, 0.0, 0.0))
+
+
+def _build_frame_from_points(obj, verts, normal):
+    center = Vector((0.0, 0.0, 0.0))
+    for vert in verts:
+        center += vert
+    center /= len(verts)
+
+    normal = obj.matrix_world.to_3x3().inverted().transposed() @ normal
+    if normal.length < 1.0e-8:
+        raise ValueError("Selected face has no usable normal")
+    normal.normalize()
+
+    tangent = None
+    longest = 0.0
+
+    for index, vert in enumerate(verts):
+        next_vert = verts[(index + 1) % len(verts)]
+        edge = next_vert - vert
+        edge -= normal * edge.dot(normal)
+        length = edge.length
+
+        if length > longest:
+            longest = length
+            tangent = edge
+
+    if tangent is None or tangent.length < 1.0e-8:
+        tangent = _orthogonal_fallback_axis(normal).cross(normal)
+
+    tangent.normalize()
+    bitangent = normal.cross(tangent)
+
+    if bitangent.length < 1.0e-8:
+        tangent = _orthogonal_fallback_axis(normal).cross(normal)
+        tangent.normalize()
+        bitangent = normal.cross(tangent)
+
+    bitangent.normalize()
+    tangent = bitangent.cross(normal)
+    tangent.normalize()
+
+    frame = Matrix.Identity(4)
+    frame.col[0][0:3] = tangent
+    frame.col[1][0:3] = bitangent
+    frame.col[2][0:3] = normal
+    frame.col[3][0:3] = center
+
+    return frame
+
+
+def _build_polygon_frame(obj, polygon):
+    verts = [
+        obj.matrix_world @ obj.data.vertices[index].co
+        for index in polygon.vertices
+    ]
+
+    return _build_frame_from_points(obj, verts, polygon.normal)
+
+
+def _selected_face_frame_for_object(obj):
+    selected = [
+        polygon
+        for polygon in obj.data.polygons
+        if polygon.select and not polygon.hide
+    ]
+
+    if len(selected) != 1:
+        return len(selected), None
+
+    return 1, _build_polygon_frame(obj, selected[0])
+
+
+def _restore_edit_context(context, objects, active):
+    bpy.ops.object.select_all(action='DESELECT')
+
+    for obj in objects:
+        obj.select_set(True)
+
+    context.view_layer.objects.active = active
+    bpy.ops.object.mode_set(mode='EDIT')
+
+
+class OBJECT_OT_align_object_to_active_selected_face(bpy.types.Operator):
+    bl_idname = "object.align_object_to_active_selected_face"
+    bl_label = "Align Object To Active Selected Face"
+    bl_description = (
+        "In multi-object Edit Mode, align the other object's selected face "
+        "to the active object's selected face"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    flip_normal: bpy.props.BoolProperty(
+        name="Flip Normal",
+        description="Align the moving face normal to the opposite direction of the target face normal",
+        default=False,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return (
+            context.mode == 'EDIT_MESH'
+            and context.view_layer.objects.active is not None
+            and context.view_layer.objects.active.type == 'MESH'
+        )
+
+    def execute(self, context):
+        active = context.view_layer.objects.active
+        objects_in_mode = getattr(
+            context,
+            "objects_in_mode",
+            context.objects_in_mode_unique_data
+        )
+        edit_objects = [
+            obj
+            for obj in objects_in_mode
+            if obj.type == 'MESH'
+        ]
+
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+        object_frames = []
+
+        for obj in edit_objects:
+            try:
+                selected_count, frame = _selected_face_frame_for_object(obj)
+            except ValueError as error:
+                _restore_edit_context(context, edit_objects, active)
+                self.report({'ERROR'}, str(error))
+                return {'CANCELLED'}
+
+            if selected_count:
+                object_frames.append((obj, selected_count, frame))
+
+        if len(object_frames) != 2:
+            _restore_edit_context(context, edit_objects, active)
+            self.report({'ERROR'}, "Select exactly one face on each of two mesh objects")
+            return {'CANCELLED'}
+
+        for obj, selected_count, frame in object_frames:
+            if selected_count != 1:
+                _restore_edit_context(context, edit_objects, active)
+                self.report({'ERROR'}, "Each object must have exactly one selected face")
+                return {'CANCELLED'}
+
+        source_items = [
+            item
+            for item in object_frames
+            if item[0] != active
+        ]
+
+        target_items = [
+            item
+            for item in object_frames
+            if item[0] == active
+        ]
+
+        if len(source_items) != 1 or len(target_items) != 1:
+            _restore_edit_context(context, edit_objects, active)
+            self.report({'ERROR'}, "The active object must be one of the two face-selected objects")
+            return {'CANCELLED'}
+
+        source, source_count, source_frame = source_items[0]
+        target, target_count, target_frame = target_items[0]
+
+        if self.flip_normal:
+            target_frame.col[1][0:3] = -Vector(target_frame.col[1][0:3])
+            target_frame.col[2][0:3] = -Vector(target_frame.col[2][0:3])
+
+        transform_delta = target_frame @ source_frame.inverted()
+
+        source.matrix_world = transform_delta @ source.matrix_world
+
+        bpy.ops.object.select_all(action='DESELECT')
+        source.select_set(True)
+        target.select_set(True)
+        context.view_layer.objects.active = target
+        bpy.ops.object.mode_set(mode='EDIT')
+
+        self.report(
+            {'INFO'},
+            f"Aligned {source.name} selected face to {target.name} selected face"
+        )
+
+        return {'FINISHED'}
+
+
 classes = (
     OBJECT_OT_move_each_selected_to_clicked_object,
+    OBJECT_OT_align_object_to_active_selected_face,
 )
 
 
@@ -394,6 +586,21 @@ def register_keymaps():
         type='A',
         value='PRESS',
         alt=True
+    )
+
+    addon_keymaps.append((km, kmi))
+
+    km = kc.keymaps.new(
+        name='Mesh',
+        space_type='EMPTY'
+    )
+
+    kmi = km.keymap_items.new(
+        OBJECT_OT_align_object_to_active_selected_face.bl_idname,
+        type='A',
+        value='PRESS',
+        alt=True,
+        shift=True
     )
 
     addon_keymaps.append((km, kmi))

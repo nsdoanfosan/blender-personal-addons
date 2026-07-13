@@ -16,6 +16,7 @@ from . import move_collection
 from . import rename_objects
 from . import scene_collection_object_renamer
 from . import ta_tool
+from . import face_sets_to_materials
 
 
 modules = (
@@ -27,6 +28,7 @@ modules = (
     rename_objects,
     scene_collection_object_renamer,
     ta_tool,
+    face_sets_to_materials,
 )
 
 

@@ -211,7 +211,7 @@ def ensure_bevel_weight_layer(bm):
 class MESH_OT_toggle_each_selected_seam(bpy.types.Operator):
     bl_idname = "mesh.toggle_each_selected_seam"
     bl_label = "Toggle Each Selected Seam"
-    bl_description = "Toggle seam individually on selected edges or selected face edges"
+    bl_description = "Toggle seam uniformly on selected edges or selected face edges"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -220,31 +220,40 @@ class MESH_OT_toggle_each_selected_seam(bpy.types.Operator):
 
     def execute(self, context):
         total = 0
+        targets_by_object = []
+        all_selected_are_marked = True
 
         for obj in get_edit_mesh_objects(context):
             mesh = obj.data
             bm = bmesh.from_edit_mesh(mesh)
 
             target_edges = collect_target_edges(bm)
+            if target_edges:
+                all_selected_are_marked = all_selected_are_marked and all(e.seam for e in target_edges)
+                targets_by_object.append((mesh, bm, target_edges))
 
+        if not targets_by_object:
+            self.report({'WARNING'}, "No selected edges or faces")
+            return {'CANCELLED'}
+
+        target_value = not all_selected_are_marked
+
+        for mesh, bm, target_edges in targets_by_object:
             for e in target_edges:
-                e.seam = not e.seam
+                e.seam = target_value
 
             total += len(target_edges)
             bmesh.update_edit_mesh(mesh, loop_triangles=False, destructive=False)
 
-        if total == 0:
-            self.report({'WARNING'}, "No selected edges or faces")
-            return {'CANCELLED'}
-
-        self.report({'INFO'}, f"Toggled seam on {total} edges")
+        action = "Marked" if target_value else "Cleared"
+        self.report({'INFO'}, f"{action} seam on {total} edges")
         return {'FINISHED'}
 
 
 class MESH_OT_toggle_each_selected_edge_bevel_weight(bpy.types.Operator):
     bl_idname = "mesh.toggle_each_selected_edge_bevel_weight"
     bl_label = "Toggle Each Selected Edge Bevel Weight"
-    bl_description = "Toggle edge bevel weight individually between 0 and 1"
+    bl_description = "Toggle edge bevel weight uniformly between 0 and 1"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -253,6 +262,8 @@ class MESH_OT_toggle_each_selected_edge_bevel_weight(bpy.types.Operator):
 
     def execute(self, context):
         total = 0
+        targets_by_object = []
+        all_selected_are_marked = True
 
         for obj in get_edit_mesh_objects(context):
             mesh = obj.data
@@ -265,26 +276,32 @@ class MESH_OT_toggle_each_selected_edge_bevel_weight(bpy.types.Operator):
             bm.faces.ensure_lookup_table()
 
             target_edges = collect_target_edges(bm)
+            if target_edges:
+                all_selected_are_marked = all_selected_are_marked and all(e[bevel_layer] > 0.0 for e in target_edges)
+                targets_by_object.append((mesh, bm, bevel_layer, target_edges))
 
+        if not targets_by_object:
+            self.report({'WARNING'}, "No selected edges or faces")
+            return {'CANCELLED'}
+
+        target_value = 0.0 if all_selected_are_marked else 1.0
+
+        for mesh, bm, bevel_layer, target_edges in targets_by_object:
             for e in target_edges:
-                current_value = e[bevel_layer]
-                e[bevel_layer] = 0.0 if current_value > 0.0 else 1.0
+                e[bevel_layer] = target_value
 
             total += len(target_edges)
             bmesh.update_edit_mesh(mesh, loop_triangles=False, destructive=False)
 
-        if total == 0:
-            self.report({'WARNING'}, "No selected edges or faces")
-            return {'CANCELLED'}
-
-        self.report({'INFO'}, f"Toggled bevel weight on {total} edges")
+        action = "Set" if target_value > 0.0 else "Cleared"
+        self.report({'INFO'}, f"{action} bevel weight on {total} edges")
         return {'FINISHED'}
 
 
 class MESH_OT_toggle_each_selected_sharp(bpy.types.Operator):
     bl_idname = "mesh.toggle_each_selected_sharp"
     bl_label = "Toggle Each Selected Sharp"
-    bl_description = "Toggle sharpness individually on selected edges or selected face edges"
+    bl_description = "Toggle sharpness uniformly on selected edges or selected face edges"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -293,26 +310,35 @@ class MESH_OT_toggle_each_selected_sharp(bpy.types.Operator):
 
     def execute(self, context):
         total = 0
+        targets_by_object = []
+        all_selected_are_marked = True
 
         for obj in get_edit_mesh_objects(context):
             mesh = obj.data
             bm = bmesh.from_edit_mesh(mesh)
 
             target_edges = collect_target_edges(bm)
+            if target_edges:
+                all_selected_are_marked = all_selected_are_marked and all(not e.smooth for e in target_edges)
+                targets_by_object.append((mesh, bm, target_edges))
 
+        if not targets_by_object:
+            self.report({'WARNING'}, "No selected edges or faces")
+            return {'CANCELLED'}
+
+        target_smooth = all_selected_are_marked
+
+        for mesh, bm, target_edges in targets_by_object:
             for e in target_edges:
                 # e.smooth == True  : sharp 아님
                 # e.smooth == False : sharp
-                e.smooth = not e.smooth
+                e.smooth = target_smooth
 
             total += len(target_edges)
             bmesh.update_edit_mesh(mesh, loop_triangles=False, destructive=False)
 
-        if total == 0:
-            self.report({'WARNING'}, "No selected edges or faces")
-            return {'CANCELLED'}
-
-        self.report({'INFO'}, f"Toggled sharp on {total} edges")
+        action = "Marked" if not target_smooth else "Cleared"
+        self.report({'INFO'}, f"{action} sharp on {total} edges")
         return {'FINISHED'}
 
 

@@ -7,7 +7,7 @@ junctions.
 
 - `addons/ta_tools`: collection export, linked object, collection move, rename,
   alpha image silhouette mesh, and mesh utility tools.
-- `addons/ta_uv_tools`: UV fit and 90 degree rotation tools.
+- `addons/ta_uv_tools`: UV fit, 90 degree rotation, and material border seam tools.
 - `addons/align_object`: clicked-object alignment tool.
 - `addons/toggle_selected_edge_marks`: seam, bevel weight, and sharp toggles.
 - `addons/xyz_transform_gizmo_overlay_stable`: viewport transform overlay.

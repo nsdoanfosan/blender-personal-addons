@@ -9,11 +9,13 @@ bl_info = {
 }
 
 from . import fit_uv_uniform
+from . import material_border_seams
 from . import rotate_90_hotkeys
 
 
 modules = (
     fit_uv_uniform,
+    material_border_seams,
     rotate_90_hotkeys,
 )
 

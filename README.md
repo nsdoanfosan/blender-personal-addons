@@ -11,6 +11,8 @@ junctions.
 - `addons/align_object`: clicked-object alignment tool.
 - `addons/toggle_selected_edge_marks`: seam, bevel weight, and sharp toggles.
 - `addons/xyz_transform_gizmo_overlay_stable`: viewport transform overlay.
+- `addons/wire_bounds_selection_visibility`: hides WIRE/BOUNDS helper objects and
+  reveals the active helper as WIRE when it is clicked in the Outliner.
 - `vendor`: third-party source snapshots. These are not deployed by the script.
 - `archive`: retired source snapshots. These are not deployed by the script.
 

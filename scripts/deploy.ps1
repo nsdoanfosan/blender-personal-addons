@@ -12,7 +12,8 @@ $packages = @(
     "ta_uv_tools",
     "align_object",
     "toggle_selected_edge_marks",
-    "xyz_transform_gizmo_overlay_stable"
+    "xyz_transform_gizmo_overlay_stable",
+    "wire_bounds_selection_visibility"
 )
 
 if (-not (Test-Path -LiteralPath $deployRoot)) {

@@ -1,10 +1,10 @@
 bl_info = {
     "name": "TA Tools",
     "author": "PARK",
-    "version": (1, 0, 0),
+    "version": (1, 1, 1),
     "blender": (4, 0, 0),
-    "location": "View3D > Sidebar",
-    "description": "Personal collection, naming, linked object, and mesh utilities",
+    "location": "View3D > Sidebar; Ctrl+Shift+J",
+    "description": "Personal collection, naming, linked object, mesh utilities, and quick menu",
     "category": "Object",
 }
 
@@ -17,6 +17,7 @@ from . import rename_objects
 from . import scene_collection_object_renamer
 from . import ta_tool
 from . import face_sets_to_materials
+from . import quick_menu
 
 
 modules = (
@@ -29,6 +30,7 @@ modules = (
     scene_collection_object_renamer,
     ta_tool,
     face_sets_to_materials,
+    quick_menu,
 )
 
 

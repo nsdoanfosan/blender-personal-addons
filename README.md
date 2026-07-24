@@ -10,6 +10,9 @@ junctions.
   the 3D View to open the panel-style TA Quick Menu.
 - `addons/ta_uv_tools`: UV fit, 90 degree rotation, and material border seam tools.
 - `addons/align_object`: clicked-object alignment tool.
+- `addons/clipboard_image_plane`: pastes a Windows clipboard image as a
+  textured mesh plane at the 3D cursor. Use `Ctrl+Shift+Alt+V` in the 3D View,
+  or choose `Add > Image > Paste Clipboard Image as Plane`.
 - `addons/toggle_selected_edge_marks`: seam, bevel weight, and sharp toggles.
 - `addons/xyz_transform_gizmo_overlay_stable`: viewport transform overlay.
 - `addons/wire_bounds_selection_visibility`: hides WIRE/BOUNDS helper objects and

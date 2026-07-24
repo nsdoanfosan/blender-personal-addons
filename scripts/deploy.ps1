@@ -11,6 +11,7 @@ $packages = @(
     "ta_tools",
     "ta_uv_tools",
     "align_object",
+    "clipboard_image_plane",
     "toggle_selected_edge_marks",
     "xyz_transform_gizmo_overlay_stable",
     "wire_bounds_selection_visibility"

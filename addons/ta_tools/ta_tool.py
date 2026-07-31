@@ -55,6 +55,151 @@ class TA_PT_vertex_color_panel(bpy.types.Panel):
 # ② Max-style Connect Edge (신규 엣지만 선택)
 # ─────────────────────────────────────────────
 
+def _ta_gpro_instance_collections(obj):
+    collections = []
+    seen = set()
+
+    for modifier in getattr(obj, "modifiers", []):
+        modifier_name = _ta_name_key(getattr(modifier, "name", ""))
+        node_group = getattr(modifier, "node_group", None)
+        node_group_name = _ta_name_key(getattr(node_group, "name", "")) if node_group else ""
+        is_gpro = "gproinstance" in {modifier_name, node_group_name}
+
+        if not is_gpro:
+            continue
+
+        try:
+            modifier_keys = list(modifier.keys())
+        except TypeError:
+            modifier_keys = []
+
+        for key in modifier_keys:
+            value = modifier.get(key)
+            if isinstance(value, bpy.types.Collection) and value.name not in seen:
+                collections.append(value)
+                seen.add(value.name)
+
+    return collections
+
+
+def _ta_name_key(name):
+    return "".join(char for char in name.casefold() if char.isalnum())
+
+
+def _ta_collect_uv_target_objects(objects):
+    targets = []
+    seen_objects = set()
+    seen_collections = set()
+
+    def visit_collection(collection):
+        if collection is None or collection.name in seen_collections:
+            return
+        seen_collections.add(collection.name)
+
+        for obj in collection.objects:
+            visit_object(obj)
+        for child in collection.children:
+            visit_collection(child)
+
+    def visit_object(obj):
+        if obj is None or obj.name in seen_objects:
+            return
+        seen_objects.add(obj.name)
+
+        if obj.type == 'MESH':
+            targets.append(obj)
+
+        for child in obj.children:
+            visit_object(child)
+
+        visit_collection(getattr(obj, "instance_collection", None))
+
+        for collection in _ta_gpro_instance_collections(obj):
+            visit_collection(collection)
+
+    for obj in objects:
+        visit_object(obj)
+
+    return targets
+
+
+def _ta_rename_mesh_primary_uv_to_uvmap(mesh):
+    uv_layers = mesh.uv_layers
+    if not uv_layers:
+        return "no_uv"
+
+    if len(uv_layers) > 1 and any(uv_layer.name == "UVMap" for uv_layer in uv_layers):
+        return "already_has_uvmap"
+
+    target_layer = uv_layers.active or uv_layers[0]
+    if target_layer.name == "UVMap":
+        return "already_uvmap"
+
+    target_layer.name = "UVMap"
+    return "renamed"
+
+
+class TA_OT_rename_uv_maps_to_uvmap(bpy.types.Operator):
+    bl_idname = "object.ta_rename_uv_maps_to_uvmap"
+    bl_label = "Rename UV Maps to UVMap"
+    bl_description = "Rename UV maps on selected objects, their children, collection instances, and gPro instance sources to UVMap"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and bool(context.selected_objects)
+
+    def execute(self, context):
+        objects = _ta_collect_uv_target_objects(context.selected_objects)
+
+        mesh_data_blocks = []
+        seen_mesh_data = set()
+        for obj in objects:
+            mesh = obj.data
+            mesh_key = mesh.as_pointer()
+            if mesh_key in seen_mesh_data:
+                continue
+            seen_mesh_data.add(mesh_key)
+            mesh_data_blocks.append(mesh)
+
+        renamed_count = 0
+        unchanged_count = 0
+        skipped_no_uv = 0
+
+        for mesh in mesh_data_blocks:
+            result = _ta_rename_mesh_primary_uv_to_uvmap(mesh)
+            if result == "renamed":
+                renamed_count += 1
+            elif result == "no_uv":
+                skipped_no_uv += 1
+            else:
+                unchanged_count += 1
+
+        if not mesh_data_blocks:
+            self.report({'WARNING'}, "No mesh objects found in selection")
+            return {'CANCELLED'}
+
+        self.report(
+            {'INFO'},
+            f"Renamed {renamed_count} mesh UV name(s). Unchanged {unchanged_count}. Skipped {skipped_no_uv} without UVs."
+        )
+        return {'FINISHED'}
+
+
+class TA_PT_uv_map_panel(bpy.types.Panel):
+    bl_label = "UV Map"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'TA'
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT'
+
+    def draw(self, context):
+        self.layout.operator("object.ta_rename_uv_maps_to_uvmap", icon='GROUP_UVS')
+
+
 class TA_OT_connect_edge(bpy.types.Operator):
     bl_idname = "mesh.ta_connect_edge"
     bl_label = "Connect Edge"
@@ -128,6 +273,8 @@ class TA_PT_connect_edge_panel(bpy.types.Panel):
 classes = (
     TA_OT_setup_vertex_color,
     TA_PT_vertex_color_panel,
+    TA_OT_rename_uv_maps_to_uvmap,
+    TA_PT_uv_map_panel,
     TA_OT_connect_edge,
     TA_PT_connect_edge_panel,
 )

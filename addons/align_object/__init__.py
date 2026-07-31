@@ -1,15 +1,17 @@
 bl_info = {
     "name": "Move Each Selected Object To Clicked Object - Alt A",
     "author": "ChatGPT",
-    "version": (1, 6, 0),
+    "version": (1, 9, 0),
     "blender": (4, 0, 0),
     "category": "Object",
 }
 
 import bpy
+import gpu
 import json
 from mathutils import Vector, Matrix
 from bpy_extras import view3d_utils
+from gpu_extras.batch import batch_for_shader
 
 
 addon_keymaps = []
@@ -21,6 +23,68 @@ def matrix_to_list(matrix):
 
 def list_to_matrix(data):
     return Matrix(data)
+
+
+class PickLine:
+    def __init__(self):
+        self.points = []
+        self.draw_handler = None
+        self.shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+        self.color = (0.0, 0.75, 0.75, 1.0)
+
+    def set_points(self, start, end):
+        self.points = [start, end]
+
+    def clear(self):
+        self.points = []
+
+    def draw(self):
+        if len(self.points) != 2:
+            return
+
+        batch = batch_for_shader(
+            self.shader,
+            'LINE_STRIP',
+            {"pos": self.points}
+        )
+        self.shader.bind()
+        self.shader.uniform_float("color", self.color)
+        batch.draw(self.shader)
+
+    def register(self):
+        if self.draw_handler is not None:
+            return
+
+        self.draw_handler = bpy.types.SpaceView3D.draw_handler_add(
+            self.draw,
+            (),
+            'WINDOW',
+            'POST_PIXEL'
+        )
+
+    def unregister(self):
+        if self.draw_handler is None:
+            return
+
+        bpy.types.SpaceView3D.draw_handler_remove(
+            self.draw_handler,
+            'WINDOW'
+        )
+        self.draw_handler = None
+        self.clear()
+
+
+_pick_line = None
+_pick_line_start = None
+
+
+def get_pick_line():
+    global _pick_line
+
+    if _pick_line is None:
+        _pick_line = PickLine()
+
+    return _pick_line
 
 
 class OBJECT_OT_move_each_selected_to_clicked_object(bpy.types.Operator):
@@ -55,6 +119,41 @@ class OBJECT_OT_move_each_selected_to_clicked_object(bpy.types.Operator):
             ('BOUNDING_BOX', "Bounding Box Center", "각 오브젝트의 바운딩 박스 중심 기준"),
         ],
         default='PIVOT',
+    )
+
+    source_reference_mode: bpy.props.EnumProperty(
+        name="Current Object",
+        description="Reference point on each selected object",
+        items=[
+            ('MIN', "Minimum", "Use the minimum world bounding box corner"),
+            ('CENTER', "Center", "Use the world bounding box center"),
+            ('PIVOT', "Pivot", "Use the object origin"),
+            ('MAX', "Maximum", "Use the maximum world bounding box corner"),
+            ('CURSOR', "Cursor", "Use the 3D cursor"),
+        ],
+        default='PIVOT',
+    )
+
+    target_reference_mode: bpy.props.EnumProperty(
+        name="Target Object",
+        description="Reference point on the clicked target object",
+        items=[
+            ('MIN', "Minimum", "Use the minimum world bounding box corner"),
+            ('CENTER', "Center", "Use the world bounding box center"),
+            ('PIVOT', "Pivot", "Use the object origin"),
+            ('MAX', "Maximum", "Use the maximum world bounding box corner"),
+            ('CURSOR', "Cursor", "Use the 3D cursor"),
+        ],
+        default='PIVOT',
+    )
+
+    percent: bpy.props.FloatProperty(
+        name="Percent",
+        description="Blend from the current transform toward the target alignment",
+        default=1.0,
+        soft_min=0.0,
+        soft_max=1.0,
+        step=10,
     )
 
     apply_rotation: bpy.props.BoolProperty(
@@ -121,12 +220,23 @@ class OBJECT_OT_move_each_selected_to_clicked_object(bpy.types.Operator):
         self.use_y = True
         self.use_z = True
         self.reference_mode = 'PIVOT'
+        self.source_reference_mode = 'PIVOT'
+        self.target_reference_mode = 'PIVOT'
+        self.percent = 1.0
         self.apply_rotation = False
+        global _pick_line_start
+        _pick_line_start = self._get_objects_screen_center(context, sources)
+        get_pick_line().register()
+        self._update_pick_line(context, event)
 
         context.window_manager.modal_handler_add(self)
         context.window.cursor_set('EYEDROPPER')
         context.workspace.status_text_set(
             "타겟 오브젝트를 클릭하세요. 선택 오브젝트 각각의 기준점이 타겟 기준점으로 이동합니다. / ESC 또는 우클릭 취소"
+        )
+
+        context.workspace.status_text_set(
+            "Pick a target object. ESC / Right Click cancels."
         )
 
         return {'RUNNING_MODAL'}
@@ -135,6 +245,11 @@ class OBJECT_OT_move_each_selected_to_clicked_object(bpy.types.Operator):
         if event.type in {'ESC', 'RIGHTMOUSE'}:
             self._finish_pick_mode(context)
             return {'CANCELLED'}
+
+        if event.type == 'MOUSEMOVE':
+            self._update_pick_line(context, event)
+            self._redraw_viewport(context)
+            return {'RUNNING_MODAL'}
 
         if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
             target = self._pick_object(context, event)
@@ -202,10 +317,18 @@ class OBJECT_OT_move_each_selected_to_clicked_object(bpy.types.Operator):
         row.prop(self, "use_z", toggle=True)
 
         box = layout.box()
-        box.prop(self, "reference_mode", text="Reference Mode")
+        row = box.row()
+        col = row.column()
+        col.label(text="Current Object")
+        col.prop(self, "source_reference_mode", text="")
+
+        col = row.column()
+        col.label(text="Target Object")
+        col.prop(self, "target_reference_mode", text="")
 
         box = layout.box()
         box.prop(self, "apply_rotation")
+        box.prop(self, "percent")
 
     def _apply_transform_from_original(self):
         sources = self._get_source_objects()
@@ -214,20 +337,35 @@ class OBJECT_OT_move_each_selected_to_clicked_object(bpy.types.Operator):
         if not sources or target is None:
             return
 
-        target_anchor = self._get_reference_position(target)
+        target_anchor = self._get_reference_position(
+            target,
+            self.target_reference_mode
+        )
         target_rotation = target.matrix_world.to_quaternion()
 
         for obj in sources:
-            source_anchor = self._get_reference_position(obj)
+            source_anchor = self._get_reference_position(
+                obj,
+                self.source_reference_mode
+            )
 
             desired_anchor = source_anchor.copy()
 
             if self.use_x:
-                desired_anchor.x = target_anchor.x
+                desired_anchor.x = self._blend_value(
+                    source_anchor.x,
+                    target_anchor.x
+                )
             if self.use_y:
-                desired_anchor.y = target_anchor.y
+                desired_anchor.y = self._blend_value(
+                    source_anchor.y,
+                    target_anchor.y
+                )
             if self.use_z:
-                desired_anchor.z = target_anchor.z
+                desired_anchor.z = self._blend_value(
+                    source_anchor.z,
+                    target_anchor.z
+                )
 
             if not self.apply_rotation:
                 location_delta = desired_anchor - source_anchor
@@ -241,7 +379,11 @@ class OBJECT_OT_move_each_selected_to_clicked_object(bpy.types.Operator):
             old_matrix = obj.matrix_world.copy()
             old_rotation = old_matrix.to_quaternion()
 
-            rotation_delta = target_rotation @ old_rotation.inverted()
+            blended_rotation = old_rotation.slerp(
+                target_rotation,
+                self.percent
+            )
+            rotation_delta = blended_rotation @ old_rotation.inverted()
 
             # 각 오브젝트 자신의 기준점 Pivot / Bounding Box Center를 중심으로 회전
             rotation_matrix = rotation_delta.to_matrix().to_4x4()
@@ -256,16 +398,28 @@ class OBJECT_OT_move_each_selected_to_clicked_object(bpy.types.Operator):
             obj.matrix_world = rotated_matrix
 
             # 회전 후 기준점 위치를 다시 계산해서 타겟 기준점으로 보정
-            rotated_anchor = self._get_reference_position(obj)
+            rotated_anchor = self._get_reference_position(
+                obj,
+                self.source_reference_mode
+            )
 
             corrected_anchor = rotated_anchor.copy()
 
             if self.use_x:
-                corrected_anchor.x = target_anchor.x
+                corrected_anchor.x = self._blend_value(
+                    rotated_anchor.x,
+                    target_anchor.x
+                )
             if self.use_y:
-                corrected_anchor.y = target_anchor.y
+                corrected_anchor.y = self._blend_value(
+                    rotated_anchor.y,
+                    target_anchor.y
+                )
             if self.use_z:
-                corrected_anchor.z = target_anchor.z
+                corrected_anchor.z = self._blend_value(
+                    rotated_anchor.z,
+                    target_anchor.z
+                )
 
             location_delta = corrected_anchor - rotated_anchor
 
@@ -297,28 +451,114 @@ class OBJECT_OT_move_each_selected_to_clicked_object(bpy.types.Operator):
             if name in bpy.data.objects
         ]
 
-    def _get_reference_position(self, obj):
-        if self.reference_mode == 'PIVOT':
+    def _blend_value(self, source_value, target_value):
+        return source_value + (target_value - source_value) * self.percent
+
+    def _get_reference_position(self, obj, mode=None):
+        mode = mode or self.reference_mode
+
+        if mode == 'PIVOT':
             return obj.matrix_world.translation.copy()
 
-        return self._get_world_bounding_box_center(obj)
+        if mode == 'CURSOR':
+            return bpy.context.scene.cursor.location.copy()
 
-    def _get_world_bounding_box_center(self, obj):
-        corners = [
-            obj.matrix_world @ Vector(corner)
-            for corner in obj.bound_box
-        ]
+        min_corner, center, max_corner = self._get_world_bounding_box_points(obj)
 
-        center = Vector((0.0, 0.0, 0.0))
+        if mode == 'MIN':
+            return min_corner
 
-        for corner in corners:
-            center += corner
-
-        center /= 8.0
+        if mode == 'MAX':
+            return max_corner
 
         return center
 
-    def _pick_object(self, context, event):
+    def _get_world_bounding_box_center(self, obj):
+        return self._get_world_bounding_box_points(obj)[1]
+
+    def _get_world_bounding_box_points(self, obj):
+        corners = self._get_world_bounding_box_corners(obj)
+
+        min_corner = Vector((
+            min(corner.x for corner in corners),
+            min(corner.y for corner in corners),
+            min(corner.z for corner in corners),
+        ))
+
+        max_corner = Vector((
+            max(corner.x for corner in corners),
+            max(corner.y for corner in corners),
+            max(corner.z for corner in corners),
+        ))
+
+        center = (min_corner + max_corner) * 0.5
+
+        return min_corner, center, max_corner
+
+    def _get_world_bounding_box_corners(self, obj):
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+
+        try:
+            eval_obj = obj.evaluated_get(depsgraph)
+        except Exception:
+            eval_obj = obj
+
+        corners = [
+            eval_obj.matrix_world @ Vector(corner)
+            for corner in eval_obj.bound_box
+        ]
+
+        if self._has_valid_bbox(corners):
+            return corners
+
+        mesh = None
+
+        try:
+            mesh = eval_obj.to_mesh()
+
+            if mesh and mesh.vertices:
+                points = [
+                    eval_obj.matrix_world @ vertex.co
+                    for vertex in mesh.vertices
+                ]
+
+                return self._bbox_corners_from_world_points(points)
+        except Exception:
+            pass
+        finally:
+            if mesh is not None:
+                eval_obj.to_mesh_clear()
+
+        return [obj.matrix_world.translation.copy()]
+
+    def _has_valid_bbox(self, corners):
+        if not corners:
+            return False
+
+        first = corners[0]
+
+        return any((corner - first).length > 1.0e-8 for corner in corners[1:])
+
+    def _bbox_corners_from_world_points(self, points):
+        min_x = min(point.x for point in points)
+        min_y = min(point.y for point in points)
+        min_z = min(point.z for point in points)
+        max_x = max(point.x for point in points)
+        max_y = max(point.y for point in points)
+        max_z = max(point.z for point in points)
+
+        return [
+            Vector((min_x, min_y, min_z)),
+            Vector((min_x, min_y, max_z)),
+            Vector((min_x, max_y, min_z)),
+            Vector((min_x, max_y, max_z)),
+            Vector((max_x, min_y, min_z)),
+            Vector((max_x, min_y, max_z)),
+            Vector((max_x, max_y, min_z)),
+            Vector((max_x, max_y, max_z)),
+        ]
+
+    def _pick_object_by_ray(self, context, event):
         region = context.region
         rv3d = context.space_data.region_3d
 
@@ -352,6 +592,85 @@ class OBJECT_OT_move_each_selected_to_clicked_object(bpy.types.Operator):
 
         return getattr(obj, "original", obj)
 
+    def _pick_object(self, context, event):
+        target = self._pick_object_by_ray(context, event)
+
+        if target is not None:
+            return target
+
+        return self._pick_object_with_view_select(context, event)
+
+    def _get_objects_screen_center(self, context, objects):
+        center = Vector((0.0, 0.0, 0.0))
+
+        for obj in objects:
+            center += obj.matrix_world.translation
+
+        center /= len(objects)
+
+        return view3d_utils.location_3d_to_region_2d(
+            context.region,
+            context.space_data.region_3d,
+            center,
+            default=None
+        )
+
+    def _update_pick_line(self, context, event):
+        global _pick_line_start
+
+        if _pick_line_start is None:
+            _pick_line_start = Vector((
+                event.mouse_region_x,
+                event.mouse_region_y
+            ))
+
+        mouse = (event.mouse_region_x, event.mouse_region_y)
+        get_pick_line().set_points(_pick_line_start, mouse)
+
+        target = self._pick_object_by_ray(context, event)
+        target_name = target.name if target else "None"
+        context.workspace.status_text_set(
+            f"Pick target: {target_name} | ESC / Right Click cancels"
+        )
+
+    def _pick_object_with_view_select(self, context, event):
+        old_active = context.view_layer.objects.active
+        old_selected = list(context.selected_objects)
+        old_mode = context.mode
+        picked = None
+
+        try:
+            if old_mode != 'OBJECT':
+                bpy.ops.object.mode_set(mode='OBJECT', toggle=False)
+
+            bpy.ops.object.select_all(action='DESELECT')
+            context.view_layer.objects.active = None
+            bpy.ops.view3d.select(
+                extend=False,
+                location=(event.mouse_region_x, event.mouse_region_y)
+            )
+            picked = context.view_layer.objects.active
+        finally:
+            if context.mode != 'OBJECT':
+                bpy.ops.object.mode_set(mode='OBJECT', toggle=False)
+
+            bpy.ops.object.select_all(action='DESELECT')
+
+            for obj in old_selected:
+                if obj.name in bpy.data.objects:
+                    obj.select_set(True)
+
+            if old_active and old_active.name in bpy.data.objects:
+                context.view_layer.objects.active = old_active
+
+            if old_mode != 'OBJECT':
+                try:
+                    bpy.ops.object.mode_set(mode=old_mode.split('_')[-1])
+                except Exception:
+                    pass
+
+        return picked
+
     def _restore_selection(self, context):
         bpy.ops.object.select_all(action='DESELECT')
 
@@ -363,6 +682,11 @@ class OBJECT_OT_move_each_selected_to_clicked_object(bpy.types.Operator):
             context.view_layer.objects.active = active_source
 
     def _finish_pick_mode(self, context):
+        global _pick_line_start
+
+        if _pick_line is not None:
+            _pick_line.unregister()
+        _pick_line_start = None
         context.window.cursor_set('DEFAULT')
         context.workspace.status_text_set(None)
 
@@ -372,8 +696,200 @@ class OBJECT_OT_move_each_selected_to_clicked_object(bpy.types.Operator):
                 area.tag_redraw()
 
 
+def _orthogonal_fallback_axis(normal):
+    if abs(normal.z) < 0.9:
+        return Vector((0.0, 0.0, 1.0))
+
+    return Vector((1.0, 0.0, 0.0))
+
+
+def _build_frame_from_points(obj, verts, normal):
+    center = Vector((0.0, 0.0, 0.0))
+    for vert in verts:
+        center += vert
+    center /= len(verts)
+
+    normal = obj.matrix_world.to_3x3().inverted().transposed() @ normal
+    if normal.length < 1.0e-8:
+        raise ValueError("Selected face has no usable normal")
+    normal.normalize()
+
+    tangent = None
+    longest = 0.0
+
+    for index, vert in enumerate(verts):
+        next_vert = verts[(index + 1) % len(verts)]
+        edge = next_vert - vert
+        edge -= normal * edge.dot(normal)
+        length = edge.length
+
+        if length > longest:
+            longest = length
+            tangent = edge
+
+    if tangent is None or tangent.length < 1.0e-8:
+        tangent = _orthogonal_fallback_axis(normal).cross(normal)
+
+    tangent.normalize()
+    bitangent = normal.cross(tangent)
+
+    if bitangent.length < 1.0e-8:
+        tangent = _orthogonal_fallback_axis(normal).cross(normal)
+        tangent.normalize()
+        bitangent = normal.cross(tangent)
+
+    bitangent.normalize()
+    tangent = bitangent.cross(normal)
+    tangent.normalize()
+
+    frame = Matrix.Identity(4)
+    frame.col[0][0:3] = tangent
+    frame.col[1][0:3] = bitangent
+    frame.col[2][0:3] = normal
+    frame.col[3][0:3] = center
+
+    return frame
+
+
+def _build_polygon_frame(obj, polygon):
+    verts = [
+        obj.matrix_world @ obj.data.vertices[index].co
+        for index in polygon.vertices
+    ]
+
+    return _build_frame_from_points(obj, verts, polygon.normal)
+
+
+def _selected_face_frame_for_object(obj):
+    selected = [
+        polygon
+        for polygon in obj.data.polygons
+        if polygon.select and not polygon.hide
+    ]
+
+    if len(selected) != 1:
+        return len(selected), None
+
+    return 1, _build_polygon_frame(obj, selected[0])
+
+
+def _restore_edit_context(context, objects, active):
+    bpy.ops.object.select_all(action='DESELECT')
+
+    for obj in objects:
+        obj.select_set(True)
+
+    context.view_layer.objects.active = active
+    bpy.ops.object.mode_set(mode='EDIT')
+
+
+class OBJECT_OT_align_object_to_active_selected_face(bpy.types.Operator):
+    bl_idname = "object.align_object_to_active_selected_face"
+    bl_label = "Align Object To Active Selected Face"
+    bl_description = (
+        "In multi-object Edit Mode, align the other object's selected face "
+        "to the active object's selected face"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    flip_normal: bpy.props.BoolProperty(
+        name="Flip Normal",
+        description="Align the moving face normal to the opposite direction of the target face normal",
+        default=False,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return (
+            context.mode == 'EDIT_MESH'
+            and context.view_layer.objects.active is not None
+            and context.view_layer.objects.active.type == 'MESH'
+        )
+
+    def execute(self, context):
+        active = context.view_layer.objects.active
+        objects_in_mode = getattr(
+            context,
+            "objects_in_mode",
+            context.objects_in_mode_unique_data
+        )
+        edit_objects = [
+            obj
+            for obj in objects_in_mode
+            if obj.type == 'MESH'
+        ]
+
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+        object_frames = []
+
+        for obj in edit_objects:
+            try:
+                selected_count, frame = _selected_face_frame_for_object(obj)
+            except ValueError as error:
+                _restore_edit_context(context, edit_objects, active)
+                self.report({'ERROR'}, str(error))
+                return {'CANCELLED'}
+
+            if selected_count:
+                object_frames.append((obj, selected_count, frame))
+
+        if len(object_frames) != 2:
+            _restore_edit_context(context, edit_objects, active)
+            self.report({'ERROR'}, "Select exactly one face on each of two mesh objects")
+            return {'CANCELLED'}
+
+        for obj, selected_count, frame in object_frames:
+            if selected_count != 1:
+                _restore_edit_context(context, edit_objects, active)
+                self.report({'ERROR'}, "Each object must have exactly one selected face")
+                return {'CANCELLED'}
+
+        source_items = [
+            item
+            for item in object_frames
+            if item[0] != active
+        ]
+
+        target_items = [
+            item
+            for item in object_frames
+            if item[0] == active
+        ]
+
+        if len(source_items) != 1 or len(target_items) != 1:
+            _restore_edit_context(context, edit_objects, active)
+            self.report({'ERROR'}, "The active object must be one of the two face-selected objects")
+            return {'CANCELLED'}
+
+        source, source_count, source_frame = source_items[0]
+        target, target_count, target_frame = target_items[0]
+
+        if self.flip_normal:
+            target_frame.col[1][0:3] = -Vector(target_frame.col[1][0:3])
+            target_frame.col[2][0:3] = -Vector(target_frame.col[2][0:3])
+
+        transform_delta = target_frame @ source_frame.inverted()
+
+        source.matrix_world = transform_delta @ source.matrix_world
+
+        bpy.ops.object.select_all(action='DESELECT')
+        source.select_set(True)
+        target.select_set(True)
+        context.view_layer.objects.active = target
+        bpy.ops.object.mode_set(mode='EDIT')
+
+        self.report(
+            {'INFO'},
+            f"Aligned {source.name} selected face to {target.name} selected face"
+        )
+
+        return {'FINISHED'}
+
+
 classes = (
     OBJECT_OT_move_each_selected_to_clicked_object,
+    OBJECT_OT_align_object_to_active_selected_face,
 )
 
 
@@ -394,6 +910,21 @@ def register_keymaps():
         type='A',
         value='PRESS',
         alt=True
+    )
+
+    addon_keymaps.append((km, kmi))
+
+    km = kc.keymaps.new(
+        name='Mesh',
+        space_type='EMPTY'
+    )
+
+    kmi = km.keymap_items.new(
+        OBJECT_OT_align_object_to_active_selected_face.bl_idname,
+        type='A',
+        value='PRESS',
+        alt=True,
+        shift=True
     )
 
     addon_keymaps.append((km, kmi))

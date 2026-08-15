@@ -55,9 +55,10 @@ addon = __import__(MODULE)
 
 assert hasattr(bpy.ops.view3d, "cycle_debug_render_pass")
 assert hasattr(bpy.ops.view3d, "set_debug_render_pass")
+assert hasattr(bpy.ops.wm, "debug_render_pass_input_listener")
 assert default_key_snapshot() == before_default_keys
 assert not any(
-    keymap_item.idname == addon.OPERATOR_CYCLE_ID
+    keymap_item.idname in {addon.OPERATOR_CYCLE_ID, addon.OPERATOR_SET_ID}
     and keymap_item.type in {"B", "M"}
     and not keymap_item.ctrl
     and not keymap_item.shift
@@ -71,33 +72,19 @@ assert any(
     for keymap_item in keymap.keymap_items
 )
 
-hotkeys = {
-    (keymap.name, keymap_item.type): keymap_item
-    for _keymap, keymap_item in addon.addon_keymaps
-    for keymap in (_keymap,)
-}
-expected_hotkeys = {
-    (keymap_name, key)
-    for keymap_name, _space_type in addon.KEYMAP_SPECS
-    for key in ("B", "M")
-}
-assert set(hotkeys) == expected_hotkeys
-for keymap_name, _space_type in addon.KEYMAP_SPECS:
-    b_key = hotkeys[(keymap_name, "B")]
-    m_key = hotkeys[(keymap_name, "M")]
-    assert b_key.idname == addon.OPERATOR_CYCLE_ID
-    assert m_key.idname == addon.OPERATOR_SET_ID
-    assert b_key.properties.direction == "NEXT"
-    assert m_key.properties.pass_id == "COMBINED"
-    assert not b_key.ctrl and not b_key.shift and not b_key.alt
-    assert not m_key.ctrl and not m_key.shift and not m_key.alt
-    keymap = next(km for km, kmi in addon.addon_keymaps if kmi == b_key)
-    indices = {
-        candidate.type: index
-        for index, candidate in enumerate(keymap.keymap_items)
-        if candidate in {b_key, m_key}
+addon_key_config = bpy.context.window_manager.keyconfigs.addon
+assert not any(
+    keymap_item.idname
+    in {
+        addon.OPERATOR_CYCLE_ID,
+        addon.OPERATOR_SET_ID,
+        "wm.debug_render_pass_input_listener",
     }
-    assert indices == {"M": 0, "B": 1}
+    for keymap in addon_key_config.keymaps
+    for keymap_item in keymap.keymap_items
+)
+assert addon._listener_enabled
+assert addon._load_post_start_input_listeners in bpy.app.handlers.load_post
 
 passes = addon.available_render_pass_ids()
 assert passes[0] == "COMBINED"
@@ -181,12 +168,15 @@ real_shading_context = SimpleNamespace(
     scene=SimpleNamespace(render=SimpleNamespace(engine="BLENDER_EEVEE")),
 )
 real_passes = addon.available_render_pass_ids(real_shading_context)
-assert addon.apply_adjacent_render_pass(viewport_space.shading, 1, real_passes) == "DIFFUSE_COLOR"
+assert addon.apply_debug_hotkey(real_shading_context, "B") == "DIFFUSE_COLOR"
 assert viewport_space.shading.render_pass == "DIFFUSE_COLOR"
+assert addon.apply_debug_hotkey(real_shading_context, "M") == "COMBINED"
+assert viewport_space.shading.render_pass == "COMBINED"
 viewport_space.shading.render_pass = original_render_pass
 viewport_space.shading.type = original_shading_type
 
 addon_utils.disable(MODULE, default_set=False)
-assert not addon.addon_keymaps
+assert not addon._listener_enabled
+assert addon._load_post_start_input_listeners not in bpy.app.handlers.load_post
 assert default_key_snapshot() == before_default_keys
 print("DEBUG_RENDER_PASS_CYCLE_SMOKE_OK")

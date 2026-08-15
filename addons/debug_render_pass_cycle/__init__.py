@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Debug Render Pass Cycle",
     "author": "PARK / OpenAI",
-    "version": (1, 0, 2),
+    "version": (1, 1, 0),
     "blender": (4, 0, 0),
     "location": "3D Viewport (Material Preview / Rendered) > B / M; Sidebar > View",
     "description": "Cycle Unreal-style debug render passes without changing materials",
@@ -9,6 +9,7 @@ bl_info = {
 }
 
 import bpy
+from bpy.app.handlers import persistent
 from bpy.props import EnumProperty, StringProperty
 
 
@@ -28,14 +29,11 @@ PASS_SPECS = (
     ("POSITION", "World Position"),
 )
 
-addon_keymaps = []
 SUPPORTED_RENDER_ENGINES = {"BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"}
-KEYMAP_SPECS = (
-    ("3D View", "VIEW_3D"),
-    ("Object Mode", "EMPTY"),
-    ("Mesh", "EMPTY"),
-    ("Sculpt", "EMPTY"),
-)
+
+_listener_enabled = False
+_listener_token = object()
+_listener_window_ids = set()
 
 
 def engine_supports_viewport_passes(engine):
@@ -128,6 +126,73 @@ def viewport_supports_debug_passes(context):
     if shading.type == "MATERIAL":
         return True
     return engine_supports_viewport_passes(context.scene.render.engine)
+
+
+def apply_debug_hotkey(context, key):
+    """Apply one supported bare-key action, or return None to pass it through."""
+    if not viewport_supports_debug_passes(context):
+        return None
+
+    shading = _debug_shading(context)
+    pass_ids = available_render_pass_ids(context)
+
+    if key == "B":
+        target = apply_adjacent_render_pass(shading, 1, pass_ids)
+    elif key == "M" and "COMBINED" in pass_ids:
+        try:
+            shading.render_pass = "COMBINED"
+        except (TypeError, ValueError):
+            return None
+        target = "COMBINED"
+    else:
+        return None
+
+    if target is None:
+        return None
+
+    context.area.tag_redraw()
+    return target
+
+
+class DEBUGRENDERPASS_OT_input_listener(bpy.types.Operator):
+    bl_idname = "wm.debug_render_pass_input_listener"
+    bl_label = "Debug Render Pass Input Listener"
+    bl_description = "Handle B/M before Blender's mode-specific keymaps"
+    bl_options = {"INTERNAL"}
+
+    @classmethod
+    def poll(cls, context):
+        return context.window is not None
+
+    def invoke(self, context, event):
+        window_pointer = context.window.as_pointer()
+        if window_pointer in _listener_window_ids:
+            return {"CANCELLED"}
+
+        self._listener_token = _listener_token
+        self._window_pointer = window_pointer
+        _listener_window_ids.add(window_pointer)
+        context.window_manager.modal_handler_add(self)
+        return {"RUNNING_MODAL"}
+
+    def modal(self, context, event):
+        if not _listener_enabled or self._listener_token is not _listener_token:
+            _listener_window_ids.discard(self._window_pointer)
+            return {"CANCELLED"}
+
+        if event.value != "PRESS" or event.type not in {"B", "M"}:
+            return {"PASS_THROUGH"}
+        if event.ctrl or event.shift or event.alt or event.oskey:
+            return {"PASS_THROUGH"}
+        if context.region is None or context.region.type != "WINDOW":
+            return {"PASS_THROUGH"}
+
+        target = apply_debug_hotkey(context, event.type)
+        if target is None:
+            return {"PASS_THROUGH"}
+
+        self.report({"INFO"}, f"Debug Render Pass: {render_pass_label(target)}")
+        return {"RUNNING_MODAL"}
 
 
 class DEBUGRENDERPASS_OT_cycle(bpy.types.Operator):
@@ -257,6 +322,7 @@ class DEBUGRENDERPASS_PT_view3d(bpy.types.Panel):
 
 
 classes = (
+    DEBUGRENDERPASS_OT_input_listener,
     DEBUGRENDERPASS_OT_cycle,
     DEBUGRENDERPASS_OT_set,
     DEBUGRENDERPASS_PT_view3d,
@@ -271,7 +337,7 @@ def remove_legacy_user_keymaps():
 
     def is_plain_legacy_item(keymap_item):
         return (
-            keymap_item.idname == OPERATOR_CYCLE_ID
+            keymap_item.idname in {OPERATOR_CYCLE_ID, OPERATOR_SET_ID}
             and keymap_item.type in {"B", "M"}
             and keymap_item.value == "PRESS"
             and not keymap_item.ctrl
@@ -279,12 +345,12 @@ def remove_legacy_user_keymaps():
             and not keymap_item.alt
         )
 
-    has_legacy_m = any(
-        is_plain_legacy_item(keymap_item) and keymap_item.type == "M"
+    has_legacy_items = any(
+        is_plain_legacy_item(keymap_item)
         for keymap in key_config.keymaps
         for keymap_item in keymap.keymap_items
     )
-    if not has_legacy_m:
+    if not has_legacy_items:
         return
 
     for keymap in key_config.keymaps:
@@ -297,55 +363,64 @@ def remove_legacy_user_keymaps():
             keymap.keymap_items.remove(keymap_item)
 
 
-def register_keymaps():
-    key_config = bpy.context.window_manager.keyconfigs.addon
-    if key_config is None:
-        return
+def _start_input_listeners():
+    if not _listener_enabled:
+        return None
 
-    for keymap_name, space_type in KEYMAP_SPECS:
-        keymap = key_config.keymaps.new(
-            name=keymap_name,
-            space_type=space_type,
-            region_type="WINDOW",
-        )
+    window_manager = bpy.context.window_manager
+    for window in window_manager.windows:
+        window_pointer = window.as_pointer()
+        if window_pointer in _listener_window_ids:
+            continue
 
-        b_keymap_item = keymap.keymap_items.new(
-            OPERATOR_CYCLE_ID,
-            type="B",
-            value="PRESS",
-            head=True,
-        )
-        b_keymap_item.properties.direction = "NEXT"
-        addon_keymaps.append((keymap, b_keymap_item))
-
-        m_keymap_item = keymap.keymap_items.new(
-            OPERATOR_SET_ID,
-            type="M",
-            value="PRESS",
-            head=True,
-        )
-        m_keymap_item.properties.pass_id = "COMBINED"
-        addon_keymaps.append((keymap, m_keymap_item))
-
-
-def unregister_keymaps():
-    for keymap, keymap_item in addon_keymaps:
         try:
-            keymap.keymap_items.remove(keymap_item)
-        except (ReferenceError, RuntimeError):
-            pass
-    addon_keymaps.clear()
+            with bpy.context.temp_override(window=window):
+                bpy.ops.wm.debug_render_pass_input_listener("INVOKE_DEFAULT")
+        except (RuntimeError, TypeError):
+            continue
+
+    return None
+
+
+def _schedule_input_listeners():
+    if bpy.app.background or not _listener_enabled:
+        return
+    if not bpy.app.timers.is_registered(_start_input_listeners):
+        bpy.app.timers.register(_start_input_listeners, first_interval=0.1)
+
+
+@persistent
+def _load_post_start_input_listeners(_unused):
+    _listener_window_ids.clear()
+    _schedule_input_listeners()
 
 
 def register():
+    global _listener_enabled, _listener_token
+
     for cls in classes:
         bpy.utils.register_class(cls)
+
+    _listener_token = object()
+    _listener_enabled = True
     remove_legacy_user_keymaps()
-    register_keymaps()
+    if _load_post_start_input_listeners not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_load_post_start_input_listeners)
+    _schedule_input_listeners()
 
 
 def unregister():
-    unregister_keymaps()
+    global _listener_enabled, _listener_token
+
+    _listener_enabled = False
+    _listener_token = object()
+    _listener_window_ids.clear()
+
+    if bpy.app.timers.is_registered(_start_input_listeners):
+        bpy.app.timers.unregister(_start_input_listeners)
+    if _load_post_start_input_listeners in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_load_post_start_input_listeners)
+
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
 

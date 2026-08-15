@@ -23,7 +23,8 @@ junctions.
   `Specular` > `Ambient Occlusion` > `Opacity` > `Depth` > `Position`. Press `M`
   to return immediately to `Combined`. Unreal buffer views without a Blender
   equivalent are skipped. Outside a supported shading mode, Blender's original
-  B/M tools still run.
+  B/M tools still run. A lightweight modal input listener handles supported B/M
+  presses before Blender's mode-specific keymaps, including after restart.
 - `vendor`: third-party source snapshots. These are not deployed by the script.
 - `archive`: retired source snapshots. These are not deployed by the script.
 

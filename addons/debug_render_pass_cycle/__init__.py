@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Debug Render Pass Cycle",
     "author": "PARK / OpenAI",
-    "version": (1, 1, 0),
+    "version": (1, 1, 1),
     "blender": (4, 0, 0),
     "location": "3D Viewport (Material Preview / Rendered) > B / M; Sidebar > View",
     "description": "Cycle Unreal-style debug render passes without changing materials",
@@ -34,6 +34,8 @@ SUPPORTED_RENDER_ENGINES = {"BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"}
 _listener_enabled = False
 _listener_token = object()
 _listener_window_ids = set()
+LISTENER_BL_IDNAME = "WM_OT_debug_render_pass_input_listener"
+LISTENER_WATCHDOG_INTERVAL = 2.0
 
 
 def engine_supports_viewport_passes(engine):
@@ -154,6 +156,46 @@ def apply_debug_hotkey(context, key):
     return target
 
 
+def _view3d_window_region_under_mouse(context, event):
+    """Return the View3D area/region below the event's window coordinates."""
+    window = context.window
+    if window is None or window.screen is None:
+        return None
+
+    mouse_x = event.mouse_x
+    mouse_y = event.mouse_y
+    for area in window.screen.areas:
+        if area.type != "VIEW_3D":
+            continue
+
+        for region in area.regions:
+            if region.type != "WINDOW":
+                continue
+            if (
+                region.x <= mouse_x < region.x + region.width
+                and region.y <= mouse_y < region.y + region.height
+            ):
+                return area, region
+
+    return None
+
+
+def handle_debug_hotkey_event(context, event):
+    """Handle one keyboard event exactly as the modal listener does."""
+    if event.value != "PRESS" or event.type not in {"B", "M"}:
+        return None
+    if event.ctrl or event.shift or event.alt or event.oskey:
+        return None
+
+    viewport = _view3d_window_region_under_mouse(context, event)
+    if viewport is None:
+        return None
+
+    area, region = viewport
+    with bpy.context.temp_override(window=context.window, area=area, region=region):
+        return apply_debug_hotkey(bpy.context, event.type)
+
+
 class DEBUGRENDERPASS_OT_input_listener(bpy.types.Operator):
     bl_idname = "wm.debug_render_pass_input_listener"
     bl_label = "Debug Render Pass Input Listener"
@@ -180,14 +222,7 @@ class DEBUGRENDERPASS_OT_input_listener(bpy.types.Operator):
             _listener_window_ids.discard(self._window_pointer)
             return {"CANCELLED"}
 
-        if event.value != "PRESS" or event.type not in {"B", "M"}:
-            return {"PASS_THROUGH"}
-        if event.ctrl or event.shift or event.alt or event.oskey:
-            return {"PASS_THROUGH"}
-        if context.region is None or context.region.type != "WINDOW":
-            return {"PASS_THROUGH"}
-
-        target = apply_debug_hotkey(context, event.type)
+        target = handle_debug_hotkey_event(context, event)
         if target is None:
             return {"PASS_THROUGH"}
 
@@ -368,10 +403,25 @@ def _start_input_listeners():
         return None
 
     window_manager = bpy.context.window_manager
+    live_window_ids = {window.as_pointer() for window in window_manager.windows}
+    _listener_window_ids.intersection_update(live_window_ids)
+
     for window in window_manager.windows:
         window_pointer = window.as_pointer()
-        if window_pointer in _listener_window_ids:
+        try:
+            has_listener = any(
+                operator is not None
+                and getattr(operator, "bl_idname", None) == LISTENER_BL_IDNAME
+                for operator in window.modal_operators
+            )
+        except (AttributeError, ReferenceError):
+            has_listener = window_pointer in _listener_window_ids
+
+        if has_listener:
+            _listener_window_ids.add(window_pointer)
             continue
+
+        _listener_window_ids.discard(window_pointer)
 
         try:
             with bpy.context.temp_override(window=window):
@@ -379,7 +429,9 @@ def _start_input_listeners():
         except (RuntimeError, TypeError):
             continue
 
-    return None
+    # This low-frequency watchdog also covers windows created after registration
+    # and replaces a listener if Blender ever cancels it during a file transition.
+    return LISTENER_WATCHDOG_INTERVAL if _listener_enabled else None
 
 
 def _schedule_input_listeners():

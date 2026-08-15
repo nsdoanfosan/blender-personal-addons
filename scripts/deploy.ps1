@@ -14,7 +14,8 @@ $packages = @(
     "clipboard_image_plane",
     "toggle_selected_edge_marks",
     "xyz_transform_gizmo_overlay_stable",
-    "wire_bounds_selection_visibility"
+    "wire_bounds_selection_visibility",
+    "debug_render_pass_cycle"
 )
 
 if (-not (Test-Path -LiteralPath $deployRoot)) {

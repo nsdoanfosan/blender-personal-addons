@@ -17,6 +17,11 @@ junctions.
 - `addons/xyz_transform_gizmo_overlay_stable`: viewport transform overlay.
 - `addons/wire_bounds_selection_visibility`: hides WIRE/BOUNDS helper objects and
   reveals the active helper as WIRE when it is clicked in the Outliner.
+- `addons/debug_render_pass_cycle`: cycles the active Rendered viewport through
+  Unreal-style debug passes without changing materials. Press `B` for the
+  previous pass or `M` for the next pass; `Diffuse Color` is labeled as Base
+  Color. Passes rejected by the current Blender render engine are skipped.
+  Outside a supported Rendered view, Blender's original B/M tools still run.
 - `vendor`: third-party source snapshots. These are not deployed by the script.
 - `archive`: retired source snapshots. These are not deployed by the script.
 

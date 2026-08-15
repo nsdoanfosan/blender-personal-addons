@@ -47,6 +47,13 @@ assert hotkeys["B"].properties.direction == "PREVIOUS"
 assert hotkeys["M"].properties.direction == "NEXT"
 assert not hotkeys["B"].ctrl and not hotkeys["B"].shift and not hotkeys["B"].alt
 assert not hotkeys["M"].ctrl and not hotkeys["M"].shift and not hotkeys["M"].alt
+hotkey_indices = sorted(
+    index
+    for keymap, keymap_item in addon.addon_keymaps
+    for index, candidate in enumerate(keymap.keymap_items)
+    if candidate == keymap_item
+)
+assert hotkey_indices == [0, 1]
 
 passes = addon.available_render_pass_ids()
 assert passes[0] == "COMBINED"
@@ -95,6 +102,9 @@ fake_context = SimpleNamespace(
     scene=SimpleNamespace(render=SimpleNamespace(engine="CYCLES")),
 )
 assert addon.available_render_pass_ids(fake_context) == ()
+fake_context.space_data.shading.type = "MATERIAL"
+assert "DIFFUSE_COLOR" in addon.available_render_pass_ids(fake_context)
+fake_context.space_data.shading.type = "RENDERED"
 fake_context.scene.render.engine = "BLENDER_EEVEE"
 assert "DIFFUSE_COLOR" in addon.available_render_pass_ids(fake_context)
 
@@ -103,7 +113,7 @@ viewport_area = next(area for area in layout_screen.areas if area.type == "VIEW_
 viewport_space = viewport_area.spaces.active
 original_shading_type = viewport_space.shading.type
 original_render_pass = viewport_space.shading.render_pass
-viewport_space.shading.type = "RENDERED"
+viewport_space.shading.type = "MATERIAL"
 real_shading_context = SimpleNamespace(
     area=viewport_area,
     space_data=viewport_space,

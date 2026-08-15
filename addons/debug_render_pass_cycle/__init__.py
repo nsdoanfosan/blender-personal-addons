@@ -1,9 +1,9 @@
 bl_info = {
     "name": "Debug Render Pass Cycle",
     "author": "PARK / OpenAI",
-    "version": (1, 0, 0),
+    "version": (1, 0, 1),
     "blender": (4, 0, 0),
-    "location": "3D Viewport (Rendered) > B / M; Sidebar > View",
+    "location": "3D Viewport (Material Preview / Rendered) > B / M; Sidebar > View",
     "description": "Cycle Unreal-style debug render passes without changing materials",
     "category": "3D View",
 }
@@ -43,12 +43,9 @@ def engine_supports_viewport_passes(engine):
 
 
 def available_render_pass_ids(context=None):
-    """Return passes Blender can expose for the current Rendered viewport."""
+    """Return passes Blender can expose for the current viewport shading mode."""
     if context is not None:
-        shading = _rendered_shading(context)
-        if shading is None:
-            return ()
-        if not engine_supports_viewport_passes(context.scene.render.engine):
+        if not viewport_supports_debug_passes(context):
             return ()
 
     prop = bpy.types.View3DShading.bl_rna.properties.get("render_pass")
@@ -109,22 +106,34 @@ def apply_adjacent_render_pass(shading, step, pass_ids):
     return None
 
 
-def _rendered_shading(context):
+def _debug_shading(context):
     area = context.area
     space = context.space_data
     if area is None or area.type != "VIEW_3D":
         return None
     if space is None or space.type != "VIEW_3D":
         return None
-    if space.shading.type != "RENDERED":
+    if space.shading.type not in {"MATERIAL", "RENDERED"}:
         return None
     return space.shading
+
+
+def viewport_supports_debug_passes(context):
+    shading = _debug_shading(context)
+    if shading is None:
+        return False
+
+    # Blender's own Render Pass popover is available in Material Preview for
+    # every scene engine, and in Rendered view for Eevee.
+    if shading.type == "MATERIAL":
+        return True
+    return engine_supports_viewport_passes(context.scene.render.engine)
 
 
 class DEBUGRENDERPASS_OT_cycle(bpy.types.Operator):
     bl_idname = OPERATOR_CYCLE_ID
     bl_label = "Cycle Debug Render Pass"
-    bl_description = "Cycle the active Rendered viewport through debug render passes"
+    bl_description = "Cycle the active viewport through supported debug render passes"
     bl_options = {"INTERNAL"}
 
     direction: EnumProperty(
@@ -143,17 +152,20 @@ class DEBUGRENDERPASS_OT_cycle(bpy.types.Operator):
 
     def invoke(self, context, event):
         # Passing through is what preserves Blender's normal B/M tools everywhere
-        # except an actively Rendered 3D viewport.
-        if _rendered_shading(context) is None:
+        # except a supported Material Preview or Rendered 3D viewport.
+        if _debug_shading(context) is None:
             return {"PASS_THROUGH"}
         if len(available_render_pass_ids(context)) < 2:
             return {"PASS_THROUGH"}
         return self.execute(context)
 
     def execute(self, context):
-        shading = _rendered_shading(context)
+        shading = _debug_shading(context)
         if shading is None:
-            self.report({"WARNING"}, "Debug passes are available in Rendered view")
+            self.report(
+                {"WARNING"},
+                "Debug passes require Material Preview or a supported Rendered view",
+            )
             return {"CANCELLED"}
 
         pass_ids = available_render_pass_ids(context)
@@ -171,7 +183,7 @@ class DEBUGRENDERPASS_OT_cycle(bpy.types.Operator):
 class DEBUGRENDERPASS_OT_set(bpy.types.Operator):
     bl_idname = OPERATOR_SET_ID
     bl_label = "Set Debug Render Pass"
-    bl_description = "Show a specific pass in the active Rendered viewport"
+    bl_description = "Show a specific pass in the active viewport"
     bl_options = {"INTERNAL"}
 
     pass_id: StringProperty(options={"SKIP_SAVE"})
@@ -181,9 +193,12 @@ class DEBUGRENDERPASS_OT_set(bpy.types.Operator):
         return context.area is not None and context.area.type == "VIEW_3D"
 
     def execute(self, context):
-        shading = _rendered_shading(context)
+        shading = _debug_shading(context)
         if shading is None:
-            self.report({"WARNING"}, "Switch the viewport to Rendered view first")
+            self.report(
+                {"WARNING"},
+                "Switch to Material Preview or a supported Rendered view first",
+            )
             return {"CANCELLED"}
 
         if self.pass_id not in available_render_pass_ids(context):
@@ -211,13 +226,14 @@ class DEBUGRENDERPASS_PT_view3d(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         shading = context.space_data.shading
+        is_material = shading.type == "MATERIAL"
         is_rendered = shading.type == "RENDERED"
         engine_supported = engine_supports_viewport_passes(context.scene.render.engine)
-        is_usable = is_rendered and engine_supported
+        is_usable = is_material or (is_rendered and engine_supported)
 
-        if not is_rendered:
-            layout.label(text="Switch to Rendered view", icon="INFO")
-        elif not engine_supported:
+        if not is_material and not is_rendered:
+            layout.label(text="Use Material Preview or Rendered view", icon="INFO")
+        elif is_rendered and not engine_supported:
             layout.label(text="This engine has no viewport debug passes", icon="INFO")
 
         column = layout.column(align=True)
@@ -235,7 +251,7 @@ class DEBUGRENDERPASS_PT_view3d(bpy.types.Panel):
         reset.pass_id = "COMBINED"
 
         layout.separator()
-        layout.label(text="B/M only override tools in Rendered view")
+        layout.label(text="B/M override in Material Preview / Rendered")
 
 
 classes = (
@@ -261,6 +277,7 @@ def register_keymaps():
             OPERATOR_CYCLE_ID,
             type=key,
             value="PRESS",
+            head=True,
         )
         keymap_item.properties.direction = direction
         addon_keymaps.append((keymap, keymap_item))

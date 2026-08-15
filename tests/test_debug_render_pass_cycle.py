@@ -29,35 +29,96 @@ def default_key_snapshot():
 
 before_default_keys = default_key_snapshot()
 
+user_key_config = bpy.context.window_manager.keyconfigs.user
+legacy_keymap = user_key_config.keymaps.get("3D View")
+if legacy_keymap is None:
+    legacy_keymap = user_key_config.keymaps.new(
+        name="3D View",
+        space_type="VIEW_3D",
+        region_type="WINDOW",
+    )
+legacy_item = legacy_keymap.keymap_items.new(
+    "view3d.cycle_debug_render_pass",
+    type="M",
+    value="PRESS",
+)
+custom_item = legacy_keymap.keymap_items.new(
+    "view3d.cycle_debug_render_pass",
+    type="B",
+    value="PRESS",
+    shift=True,
+)
+assert any(candidate == legacy_item for candidate in legacy_keymap.keymap_items)
+
 addon_utils.enable(MODULE, default_set=False)
 addon = __import__(MODULE)
 
 assert hasattr(bpy.ops.view3d, "cycle_debug_render_pass")
 assert hasattr(bpy.ops.view3d, "set_debug_render_pass")
 assert default_key_snapshot() == before_default_keys
+assert not any(
+    keymap_item.idname == addon.OPERATOR_CYCLE_ID
+    and keymap_item.type in {"B", "M"}
+    and not keymap_item.ctrl
+    and not keymap_item.shift
+    and not keymap_item.alt
+    for keymap in user_key_config.keymaps
+    for keymap_item in keymap.keymap_items
+)
+assert any(
+    keymap_item == custom_item
+    for keymap in user_key_config.keymaps
+    for keymap_item in keymap.keymap_items
+)
 
 hotkeys = {
-    keymap_item.type: keymap_item
+    (keymap.name, keymap_item.type): keymap_item
     for _keymap, keymap_item in addon.addon_keymaps
+    for keymap in (_keymap,)
 }
-assert set(hotkeys) == {"B", "M"}
-assert hotkeys["B"].idname == addon.OPERATOR_CYCLE_ID
-assert hotkeys["M"].idname == addon.OPERATOR_CYCLE_ID
-assert hotkeys["B"].properties.direction == "PREVIOUS"
-assert hotkeys["M"].properties.direction == "NEXT"
-assert not hotkeys["B"].ctrl and not hotkeys["B"].shift and not hotkeys["B"].alt
-assert not hotkeys["M"].ctrl and not hotkeys["M"].shift and not hotkeys["M"].alt
-hotkey_indices = sorted(
-    index
-    for keymap, keymap_item in addon.addon_keymaps
-    for index, candidate in enumerate(keymap.keymap_items)
-    if candidate == keymap_item
-)
-assert hotkey_indices == [0, 1]
+expected_hotkeys = {
+    (keymap_name, key)
+    for keymap_name, _space_type in addon.KEYMAP_SPECS
+    for key in ("B", "M")
+}
+assert set(hotkeys) == expected_hotkeys
+for keymap_name, _space_type in addon.KEYMAP_SPECS:
+    b_key = hotkeys[(keymap_name, "B")]
+    m_key = hotkeys[(keymap_name, "M")]
+    assert b_key.idname == addon.OPERATOR_CYCLE_ID
+    assert m_key.idname == addon.OPERATOR_SET_ID
+    assert b_key.properties.direction == "NEXT"
+    assert m_key.properties.pass_id == "COMBINED"
+    assert not b_key.ctrl and not b_key.shift and not b_key.alt
+    assert not m_key.ctrl and not m_key.shift and not m_key.alt
+    keymap = next(km for km, kmi in addon.addon_keymaps if kmi == b_key)
+    indices = {
+        candidate.type: index
+        for index, candidate in enumerate(keymap.keymap_items)
+        if candidate in {b_key, m_key}
+    }
+    assert indices == {"M": 0, "B": 1}
 
 passes = addon.available_render_pass_ids()
 assert passes[0] == "COMBINED"
 assert "DIFFUSE_COLOR" in passes
+assert passes[:5] == (
+    "COMBINED",
+    "DIFFUSE_COLOR",
+    "NORMAL",
+    "SPECULAR_COLOR",
+    "AO",
+)
+assert passes == (
+    "COMBINED",
+    "DIFFUSE_COLOR",
+    "NORMAL",
+    "SPECULAR_COLOR",
+    "AO",
+    "TRANSPARENT",
+    "MIST",
+    "POSITION",
+)
 assert addon.render_pass_label("DIFFUSE_COLOR") == "Base Color (Diffuse Color)"
 assert addon.adjacent_render_pass("COMBINED", 1, passes) == "DIFFUSE_COLOR"
 assert addon.adjacent_render_pass("DIFFUSE_COLOR", -1, passes) == "COMBINED"

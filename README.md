@@ -19,10 +19,11 @@ junctions.
   reveals the active helper as WIRE when it is clicked in the Outliner.
 - `addons/debug_render_pass_cycle`: cycles the active Material Preview or
   supported Rendered viewport through Unreal-style debug passes without changing
-  materials. Press `B` for the previous pass or `M` for the next pass; `Diffuse
-  Color` is labeled as Base Color. Passes rejected by the current Blender render
-  engine are skipped. Outside a supported shading mode, Blender's original B/M
-  tools still run.
+  materials. Press `B` to advance through `Combined` > `Base Color` > `Normal` >
+  `Specular` > `Ambient Occlusion` > `Opacity` > `Depth` > `Position`. Press `M`
+  to return immediately to `Combined`. Unreal buffer views without a Blender
+  equivalent are skipped. Outside a supported shading mode, Blender's original
+  B/M tools still run.
 - `vendor`: third-party source snapshots. These are not deployed by the script.
 - `archive`: retired source snapshots. These are not deployed by the script.
 

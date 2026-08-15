@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Debug Render Pass Cycle",
     "author": "PARK / OpenAI",
-    "version": (1, 0, 1),
+    "version": (1, 0, 2),
     "blender": (4, 0, 0),
     "location": "3D Viewport (Material Preview / Rendered) > B / M; Sidebar > View",
     "description": "Cycle Unreal-style debug render passes without changing materials",
@@ -21,21 +21,21 @@ PASS_SPECS = (
     ("COMBINED", "Combined"),
     ("DIFFUSE_COLOR", "Base Color (Diffuse Color)"),
     ("NORMAL", "Normal"),
-    ("POSITION", "Position"),
-    ("DIFFUSE_LIGHT", "Diffuse Light"),
     ("SPECULAR_COLOR", "Specular Color"),
-    ("SPECULAR_LIGHT", "Specular Light"),
     ("AO", "Ambient Occlusion"),
-    ("SHADOW", "Shadow"),
-    ("EMISSION", "Emission"),
-    ("ENVIRONMENT", "Environment"),
-    ("VOLUME_LIGHT", "Volume Light"),
-    ("MIST", "Mist"),
     ("TRANSPARENT", "Transparent"),
+    ("MIST", "Scene Depth (Mist)"),
+    ("POSITION", "World Position"),
 )
 
 addon_keymaps = []
 SUPPORTED_RENDER_ENGINES = {"BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"}
+KEYMAP_SPECS = (
+    ("3D View", "VIEW_3D"),
+    ("Object Mode", "EMPTY"),
+    ("Mesh", "EMPTY"),
+    ("Sculpt", "EMPTY"),
+)
 
 
 def engine_supports_viewport_passes(engine):
@@ -192,6 +192,11 @@ class DEBUGRENDERPASS_OT_set(bpy.types.Operator):
     def poll(cls, context):
         return context.area is not None and context.area.type == "VIEW_3D"
 
+    def invoke(self, context, event):
+        if not viewport_supports_debug_passes(context):
+            return {"PASS_THROUGH"}
+        return self.execute(context)
+
     def execute(self, context):
         shading = _debug_shading(context)
         if shading is None:
@@ -242,12 +247,9 @@ class DEBUGRENDERPASS_PT_view3d(bpy.types.Panel):
             column.label(text=render_pass_label(shading.render_pass), icon="SHADING_RENDERED")
 
         row = column.row(align=True)
-        previous = row.operator(OPERATOR_CYCLE_ID, text="B  Previous", icon="TRIA_LEFT")
-        previous.direction = "PREVIOUS"
-        next_pass = row.operator(OPERATOR_CYCLE_ID, text="M  Next", icon="TRIA_RIGHT")
+        next_pass = row.operator(OPERATOR_CYCLE_ID, text="B  Next", icon="TRIA_RIGHT")
         next_pass.direction = "NEXT"
-
-        reset = column.operator(OPERATOR_SET_ID, text="Combined", icon="FILE_REFRESH")
+        reset = row.operator(OPERATOR_SET_ID, text="M  Combined", icon="FILE_REFRESH")
         reset.pass_id = "COMBINED"
 
         layout.separator()
@@ -261,26 +263,69 @@ classes = (
 )
 
 
+def remove_legacy_user_keymaps():
+    """Remove stale shortcuts written by older versions of this add-on."""
+    key_config = bpy.context.window_manager.keyconfigs.user
+    if key_config is None:
+        return
+
+    def is_plain_legacy_item(keymap_item):
+        return (
+            keymap_item.idname == OPERATOR_CYCLE_ID
+            and keymap_item.type in {"B", "M"}
+            and keymap_item.value == "PRESS"
+            and not keymap_item.ctrl
+            and not keymap_item.shift
+            and not keymap_item.alt
+        )
+
+    has_legacy_m = any(
+        is_plain_legacy_item(keymap_item) and keymap_item.type == "M"
+        for keymap in key_config.keymaps
+        for keymap_item in keymap.keymap_items
+    )
+    if not has_legacy_m:
+        return
+
+    for keymap in key_config.keymaps:
+        stale_items = [
+            keymap_item
+            for keymap_item in keymap.keymap_items
+            if is_plain_legacy_item(keymap_item)
+        ]
+        for keymap_item in stale_items:
+            keymap.keymap_items.remove(keymap_item)
+
+
 def register_keymaps():
     key_config = bpy.context.window_manager.keyconfigs.addon
     if key_config is None:
         return
 
-    keymap = key_config.keymaps.new(
-        name="3D View",
-        space_type="VIEW_3D",
-        region_type="WINDOW",
-    )
+    for keymap_name, space_type in KEYMAP_SPECS:
+        keymap = key_config.keymaps.new(
+            name=keymap_name,
+            space_type=space_type,
+            region_type="WINDOW",
+        )
 
-    for key, direction in (("B", "PREVIOUS"), ("M", "NEXT")):
-        keymap_item = keymap.keymap_items.new(
+        b_keymap_item = keymap.keymap_items.new(
             OPERATOR_CYCLE_ID,
-            type=key,
+            type="B",
             value="PRESS",
             head=True,
         )
-        keymap_item.properties.direction = direction
-        addon_keymaps.append((keymap, keymap_item))
+        b_keymap_item.properties.direction = "NEXT"
+        addon_keymaps.append((keymap, b_keymap_item))
+
+        m_keymap_item = keymap.keymap_items.new(
+            OPERATOR_SET_ID,
+            type="M",
+            value="PRESS",
+            head=True,
+        )
+        m_keymap_item.properties.pass_id = "COMBINED"
+        addon_keymaps.append((keymap, m_keymap_item))
 
 
 def unregister_keymaps():
@@ -295,6 +340,7 @@ def unregister_keymaps():
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
+    remove_legacy_user_keymaps()
     register_keymaps()
 
 

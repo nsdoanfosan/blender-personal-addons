@@ -181,6 +181,23 @@ assert real_views[:6] == (
     "ATTRIBUTE_MESH_AO",
     "NORMAL",
 )
+
+ao_mesh = bpy.data.meshes.new("DebugRenderPassCycle_AO_TestMesh")
+ao_object = bpy.data.objects.new("DebugRenderPassCycle_AO_TestObject", ao_mesh)
+bpy.context.scene.collection.objects.link(ao_object)
+ao_group = bpy.data.node_groups.new("HT_Mesh_AO_Test", "GeometryNodeTree")
+ao_group.interface.new_socket(name="Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
+ao_group.interface.new_socket(name="Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
+ao_input = ao_group.nodes.new("NodeGroupInput")
+ao_output = ao_group.nodes.new("NodeGroupOutput")
+ao_group.links.new(ao_input.outputs["Geometry"], ao_output.inputs["Geometry"])
+ao_modifier = ao_object.modifiers.new("HT_Mesh_AO", "NODES")
+ao_modifier.node_group = ao_group
+ao_modifier.show_viewport = True
+
+assert addon.apply_debug_view(real_shading_context, "COMBINED") == "COMBINED"
+assert not ao_modifier.show_viewport
+assert ao_modifier[addon.MESH_AO_ORIGINAL_VIEWPORT_PROP]
 assert addon.apply_debug_hotkey(real_shading_context, "B") == "DIFFUSE_COLOR"
 assert viewport_space.shading.render_pass == "DIFFUSE_COLOR"
 assert addon.apply_debug_hotkey(real_shading_context, "B") == "ATTRIBUTE_FACTOR"
@@ -189,7 +206,14 @@ assert bpy.context.view_layer.material_override is not None
 assert bpy.context.view_layer.material_override.get(addon.DEBUG_MATERIAL_TAG)
 assert addon.apply_debug_hotkey(real_shading_context, "B") == "ATTRIBUTE_RANDOM"
 assert addon.apply_debug_hotkey(real_shading_context, "B") == "ATTRIBUTE_MESH_AO"
+assert ao_modifier.show_viewport
 assert addon.apply_debug_hotkey(real_shading_context, "B") == "NORMAL"
+assert not ao_modifier.show_viewport
+ao_modifier[addon.MESH_AO_ORIGINAL_VIEWPORT_PROP] = False
+assert addon._set_mesh_ao_viewport_enabled(True) == 1
+assert ao_modifier.show_viewport
+assert ao_modifier[addon.MESH_AO_ORIGINAL_VIEWPORT_PROP]
+addon._set_mesh_ao_viewport_enabled(False)
 assert bpy.context.view_layer.material_override is None
 assert addon.apply_debug_hotkey(real_shading_context, "M") == "COMBINED"
 assert viewport_space.shading.render_pass == "COMBINED"
@@ -197,6 +221,8 @@ viewport_space.shading.render_pass = original_render_pass
 viewport_space.shading.type = original_shading_type
 
 addon_utils.disable(MODULE, default_set=False)
+assert ao_modifier.show_viewport
+assert addon.MESH_AO_ORIGINAL_VIEWPORT_PROP not in ao_modifier
 assert not addon._listener_enabled
 assert addon._load_post_start_input_listeners not in bpy.app.handlers.load_post
 assert addon._save_pre_remove_debug_materials not in bpy.app.handlers.save_pre

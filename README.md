@@ -27,7 +27,9 @@ junctions.
   debug view. Unreal buffer views without a Blender equivalent are skipped.
   Outside a supported shading mode, Blender's original B/M tools still run. A
   lightweight modal input listener handles supported B/M presses before
-  Blender's mode-specific keymaps, including after restart.
+  Blender's mode-specific keymaps, including after restart. Expensive
+  `HT_Mesh_AO` Geometry Nodes modifiers are evaluated in the viewport only while
+  the `Mesh AO` debug view is active, then disabled again on the next view.
 - `vendor`: third-party source snapshots. These are not deployed by the script.
 - `archive`: retired source snapshots. These are not deployed by the script.
 

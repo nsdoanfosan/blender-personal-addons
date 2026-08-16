@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Debug Render Pass Cycle",
     "author": "PARK / OpenAI",
-    "version": (1, 2, 0),
+    "version": (1, 3, 1),
     "blender": (4, 0, 0),
     "location": "3D Viewport (Material Preview / Rendered) > B / M; Sidebar > View",
     "description": "Cycle Unreal-style debug render passes without changing materials",
@@ -51,6 +51,8 @@ CUSTOM_VIEW_CHANNELS = {
 
 DEBUG_MATERIAL_TAG = "debug_render_pass_cycle_runtime"
 DEBUG_MATERIAL_PREFIX = ".DebugRenderPassCycle_"
+MESH_AO_MODIFIER_PREFIX = "HT_Mesh_AO"
+MESH_AO_ORIGINAL_VIEWPORT_PROP = "debug_render_pass_cycle_original_viewport"
 
 SUPPORTED_RENDER_ENGINES = {"BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"}
 
@@ -182,6 +184,72 @@ def _is_debug_material(material):
     return bool(material and material.get(DEBUG_MATERIAL_TAG, False))
 
 
+def _is_mesh_ao_modifier(modifier):
+    if modifier.type != "NODES":
+        return False
+    node_group = getattr(modifier, "node_group", None)
+    node_group_name = node_group.name if node_group is not None else ""
+    return (
+        modifier.name.startswith(MESH_AO_MODIFIER_PREFIX)
+        or node_group_name.startswith(MESH_AO_MODIFIER_PREFIX)
+    )
+
+
+def _set_mesh_ao_viewport_enabled(enabled):
+    """Evaluate expensive live AO only while the Mesh AO debug view is active."""
+    changed = 0
+    objects = getattr(bpy.data, "objects", None)
+    if objects is None:
+        return changed
+    for obj in objects:
+        for modifier in obj.modifiers:
+            if not _is_mesh_ao_modifier(modifier):
+                continue
+
+            if MESH_AO_ORIGINAL_VIEWPORT_PROP not in modifier:
+                modifier[MESH_AO_ORIGINAL_VIEWPORT_PROP] = bool(modifier.show_viewport)
+
+            original = bool(modifier[MESH_AO_ORIGINAL_VIEWPORT_PROP])
+            # Blender can temporarily unregister/re-register add-ons while opening
+            # a file. If that happens after our optimized OFF state was saved, the
+            # registration pass can mistake OFF for the user's original state.
+            # Render-enabled HT_Mesh_AO modifiers are intended to participate in
+            # the explicit Mesh AO inspection view, so repair that state here.
+            if not original and modifier.show_render:
+                original = True
+                modifier[MESH_AO_ORIGINAL_VIEWPORT_PROP] = True
+            target = original if enabled else False
+            if modifier.show_viewport == target:
+                continue
+
+            modifier.show_viewport = target
+            obj.update_tag()
+            changed += 1
+    return changed
+
+
+def _restore_mesh_ao_viewport_states():
+    """Restore user modifier visibility when the add-on is disabled."""
+    changed = 0
+    objects = getattr(bpy.data, "objects", None)
+    if objects is None:
+        return changed
+    for obj in objects:
+        for modifier in obj.modifiers:
+            if not _is_mesh_ao_modifier(modifier):
+                continue
+            if MESH_AO_ORIGINAL_VIEWPORT_PROP not in modifier:
+                continue
+
+            original = bool(modifier[MESH_AO_ORIGINAL_VIEWPORT_PROP])
+            if modifier.show_viewport != original:
+                modifier.show_viewport = original
+                obj.update_tag()
+                changed += 1
+            del modifier[MESH_AO_ORIGINAL_VIEWPORT_PROP]
+    return changed
+
+
 def _build_debug_material(view_id):
     attribute_name, packed_channel = CUSTOM_VIEW_CHANNELS[view_id]
     material = bpy.data.materials.new(f"{DEBUG_MATERIAL_PREFIX}{view_id}")
@@ -238,6 +306,7 @@ def _restore_material_overrides():
 
 def _remove_debug_materials():
     _restore_material_overrides()
+    _set_mesh_ao_viewport_enabled(False)
     _debug_materials.clear()
     materials = getattr(bpy.data, "materials", None)
     if materials is None:
@@ -356,6 +425,7 @@ def apply_debug_view(context, view_id):
             shading.render_pass = "COMBINED"
         except (TypeError, ValueError):
             return None
+        _set_mesh_ao_viewport_enabled(view_id == "ATTRIBUTE_MESH_AO")
         context.area.tag_redraw()
         return view_id
 
@@ -367,6 +437,7 @@ def apply_debug_view(context, view_id):
         shading.render_pass = view_id
     except (TypeError, ValueError):
         return None
+    _set_mesh_ao_viewport_enabled(False)
     context.area.tag_redraw()
     return view_id
 
@@ -712,6 +783,7 @@ def register():
     _listener_token = object()
     _listener_enabled = True
     _remove_debug_materials()
+    _set_mesh_ao_viewport_enabled(False)
     remove_legacy_user_keymaps()
     if _load_post_start_input_listeners not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_load_post_start_input_listeners)
@@ -729,6 +801,7 @@ def unregister():
     _listener_window_ids.clear()
     _unregister_draw_handler()
     _remove_debug_materials()
+    _restore_mesh_ao_viewport_states()
 
     if bpy.app.timers.is_registered(_start_input_listeners):
         bpy.app.timers.unregister(_start_input_listeners)

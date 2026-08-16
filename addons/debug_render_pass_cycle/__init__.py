@@ -1,13 +1,14 @@
 bl_info = {
     "name": "Debug Render Pass Cycle",
     "author": "PARK / OpenAI",
-    "version": (1, 1, 1),
+    "version": (1, 2, 0),
     "blender": (4, 0, 0),
     "location": "3D Viewport (Material Preview / Rendered) > B / M; Sidebar > View",
     "description": "Cycle Unreal-style debug render passes without changing materials",
     "category": "3D View",
 }
 
+import blf
 import bpy
 from bpy.app.handlers import persistent
 from bpy.props import EnumProperty, StringProperty
@@ -29,11 +30,37 @@ PASS_SPECS = (
     ("POSITION", "World Position"),
 )
 
+CUSTOM_VIEW_SPECS = (
+    ("ATTRIBUTE_FACTOR", "Factor"),
+    ("ATTRIBUTE_RANDOM", "Random"),
+    ("ATTRIBUTE_MESH_AO", "Mesh AO"),
+)
+
+VIEW_SPECS = (
+    PASS_SPECS[0],
+    PASS_SPECS[1],
+    *CUSTOM_VIEW_SPECS,
+    *PASS_SPECS[2:],
+)
+
+CUSTOM_VIEW_CHANNELS = {
+    "ATTRIBUTE_FACTOR": ("Factor", "R"),
+    "ATTRIBUTE_RANDOM": ("Random", "G"),
+    "ATTRIBUTE_MESH_AO": ("AO", "B"),
+}
+
+DEBUG_MATERIAL_TAG = "debug_render_pass_cycle_runtime"
+DEBUG_MATERIAL_PREFIX = ".DebugRenderPassCycle_"
+
 SUPPORTED_RENDER_ENGINES = {"BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"}
 
 _listener_enabled = False
 _listener_token = object()
 _listener_window_ids = set()
+_custom_view_by_space = {}
+_material_override_states = {}
+_debug_materials = {}
+_draw_handler = None
 LISTENER_BL_IDNAME = "WM_OT_debug_render_pass_input_listener"
 LISTENER_WATCHDOG_INTERVAL = 2.0
 
@@ -57,8 +84,29 @@ def available_render_pass_ids(context=None):
     return result
 
 
+def available_debug_view_ids(context=None):
+    """Return built-in passes plus attribute views supported by this context."""
+    render_pass_ids = available_render_pass_ids(context)
+    if not render_pass_ids:
+        return ()
+
+    supports_material_override = (
+        context is not None
+        and getattr(context, "view_layer", None) is not None
+        and hasattr(context.view_layer, "material_override")
+        and getattr(context, "space_data", None) is not None
+        and hasattr(context.space_data, "as_pointer")
+    )
+    if not supports_material_override:
+        return render_pass_ids
+
+    supported = set(render_pass_ids)
+    supported.update(identifier for identifier, _label in CUSTOM_VIEW_SPECS)
+    return tuple(identifier for identifier, _label in VIEW_SPECS if identifier in supported)
+
+
 def render_pass_label(identifier):
-    labels = dict(PASS_SPECS)
+    labels = dict(VIEW_SPECS)
     return labels.get(identifier, identifier.replace("_", " ").title())
 
 
@@ -130,29 +178,233 @@ def viewport_supports_debug_passes(context):
     return engine_supports_viewport_passes(context.scene.render.engine)
 
 
+def _is_debug_material(material):
+    return bool(material and material.get(DEBUG_MATERIAL_TAG, False))
+
+
+def _build_debug_material(view_id):
+    attribute_name, packed_channel = CUSTOM_VIEW_CHANNELS[view_id]
+    material = bpy.data.materials.new(f"{DEBUG_MATERIAL_PREFIX}{view_id}")
+    material[DEBUG_MATERIAL_TAG] = True
+    material.use_nodes = True
+
+    node_tree = material.node_tree
+    node_tree.nodes.clear()
+    output = node_tree.nodes.new("ShaderNodeOutputMaterial")
+    emission = node_tree.nodes.new("ShaderNodeEmission")
+    named_attribute = node_tree.nodes.new("ShaderNodeAttribute")
+    packed_attribute = node_tree.nodes.new("ShaderNodeAttribute")
+    separate = node_tree.nodes.new("ShaderNodeSeparateColor")
+    maximum = node_tree.nodes.new("ShaderNodeMath")
+
+    named_attribute.attribute_name = attribute_name
+    packed_attribute.attribute_name = "ChannelPacked_FRAO"
+    separate.mode = "RGB"
+    maximum.operation = "MAXIMUM"
+    emission.inputs["Strength"].default_value = 1.0
+
+    channel_socket = {
+        "R": "Red",
+        "G": "Green",
+        "B": "Blue",
+    }[packed_channel]
+    node_tree.links.new(named_attribute.outputs["Fac"], maximum.inputs[0])
+    node_tree.links.new(packed_attribute.outputs["Color"], separate.inputs["Color"])
+    node_tree.links.new(separate.outputs[channel_socket], maximum.inputs[1])
+    node_tree.links.new(maximum.outputs["Value"], emission.inputs["Color"])
+    node_tree.links.new(emission.outputs["Emission"], output.inputs["Surface"])
+    return material
+
+
+def _debug_material(view_id):
+    material = _debug_materials.get(view_id)
+    if material is None or material.name not in bpy.data.materials:
+        material = _build_debug_material(view_id)
+        _debug_materials[view_id] = material
+    return material
+
+
+def _restore_material_overrides():
+    for state in tuple(_material_override_states.values()):
+        view_layer = state["view_layer"]
+        try:
+            if _is_debug_material(view_layer.material_override):
+                view_layer.material_override = state["original"]
+        except ReferenceError:
+            pass
+    _material_override_states.clear()
+    _custom_view_by_space.clear()
+
+
+def _remove_debug_materials():
+    _restore_material_overrides()
+    _debug_materials.clear()
+    materials = getattr(bpy.data, "materials", None)
+    if materials is None:
+        return
+    for material in tuple(materials):
+        if _is_debug_material(material):
+            materials.remove(material, do_unlink=True)
+
+
+def current_debug_view_id(context):
+    space = getattr(context, "space_data", None)
+    view_layer = getattr(context, "view_layer", None)
+    if space is not None and hasattr(space, "as_pointer") and view_layer is not None:
+        space_pointer = space.as_pointer()
+        custom_view = _custom_view_by_space.get(space_pointer)
+        if custom_view is not None:
+            material = _debug_materials.get(custom_view)
+            if material is not None and view_layer.material_override == material:
+                return custom_view
+            _custom_view_by_space.pop(space_pointer, None)
+
+    shading = _debug_shading(context)
+    return shading.render_pass if shading is not None else None
+
+
+def _draw_view_indicator():
+    context = bpy.context
+    if not viewport_supports_debug_passes(context):
+        return
+
+    view_id = current_debug_view_id(context)
+    if view_id is None:
+        return
+
+    if view_id in CUSTOM_VIEW_CHANNELS:
+        color = (1.0, 0.48, 0.12, 1.0)
+    elif view_id == "COMBINED":
+        color = (0.72, 0.72, 0.72, 1.0)
+    else:
+        color = (0.25, 0.7, 1.0, 1.0)
+
+    font_id = 0
+    blf.size(font_id, 16)
+    blf.color(font_id, *color)
+    blf.enable(font_id, blf.SHADOW)
+    blf.shadow(font_id, 3, 0.0, 0.0, 0.0, 0.85)
+    blf.shadow_offset(font_id, 2, -2)
+    blf.position(font_id, 22, 22, 0)
+    blf.draw(font_id, f"DEBUG VIEW  |  {render_pass_label(view_id)}")
+    blf.disable(font_id, blf.SHADOW)
+
+
+def _draw_header_indicator(self, context):
+    if not viewport_supports_debug_passes(context):
+        return
+
+    view_id = current_debug_view_id(context)
+    if view_id is None:
+        return
+
+    icon = "GROUP_VCOL" if view_id in CUSTOM_VIEW_CHANNELS else "SHADING_RENDERED"
+    row = self.layout.row(align=True)
+    row.label(text=f"Debug: {render_pass_label(view_id)}", icon=icon)
+
+
+def _register_draw_handler():
+    global _draw_handler
+    if _draw_handler is None:
+        _draw_handler = bpy.types.SpaceView3D.draw_handler_add(
+            _draw_view_indicator,
+            (),
+            "WINDOW",
+            "POST_PIXEL",
+        )
+    if not getattr(_register_draw_handler, "header_registered", False):
+        bpy.types.VIEW3D_HT_header.append(_draw_header_indicator)
+        _register_draw_handler.header_registered = True
+
+
+def _unregister_draw_handler():
+    global _draw_handler
+    if _draw_handler is not None:
+        bpy.types.SpaceView3D.draw_handler_remove(_draw_handler, "WINDOW")
+        _draw_handler = None
+    if getattr(_register_draw_handler, "header_registered", False):
+        bpy.types.VIEW3D_HT_header.remove(_draw_header_indicator)
+        _register_draw_handler.header_registered = False
+
+
+def apply_debug_view(context, view_id):
+    shading = _debug_shading(context)
+    if shading is None:
+        return None
+
+    if view_id in CUSTOM_VIEW_CHANNELS:
+        view_layer = getattr(context, "view_layer", None)
+        space = getattr(context, "space_data", None)
+        if view_layer is None or space is None or not hasattr(space, "as_pointer"):
+            return None
+
+        view_layer_pointer = view_layer.as_pointer()
+        if view_layer_pointer not in _material_override_states:
+            original = view_layer.material_override
+            if _is_debug_material(original):
+                original = None
+            _material_override_states[view_layer_pointer] = {
+                "view_layer": view_layer,
+                "original": original,
+            }
+
+        material = _debug_material(view_id)
+        view_layer.material_override = material
+        _custom_view_by_space.clear()
+        _custom_view_by_space[space.as_pointer()] = view_id
+        try:
+            shading.render_pass = "COMBINED"
+        except (TypeError, ValueError):
+            return None
+        context.area.tag_redraw()
+        return view_id
+
+    if view_id not in available_render_pass_ids(context):
+        return None
+
+    _restore_material_overrides()
+    try:
+        shading.render_pass = view_id
+    except (TypeError, ValueError):
+        return None
+    context.area.tag_redraw()
+    return view_id
+
+
+def apply_adjacent_debug_view(context, step):
+    view_ids = available_debug_view_ids(context)
+    if not view_ids:
+        return None
+
+    current = current_debug_view_id(context)
+    try:
+        start = view_ids.index(current)
+    except ValueError:
+        start = 0
+
+    for offset in range(1, len(view_ids)):
+        target = view_ids[(start + step * offset) % len(view_ids)]
+        applied = apply_debug_view(context, target)
+        if applied is not None:
+            return applied
+    return None
+
+
 def apply_debug_hotkey(context, key):
     """Apply one supported bare-key action, or return None to pass it through."""
     if not viewport_supports_debug_passes(context):
         return None
 
-    shading = _debug_shading(context)
-    pass_ids = available_render_pass_ids(context)
-
     if key == "B":
-        target = apply_adjacent_render_pass(shading, 1, pass_ids)
-    elif key == "M" and "COMBINED" in pass_ids:
-        try:
-            shading.render_pass = "COMBINED"
-        except (TypeError, ValueError):
-            return None
-        target = "COMBINED"
+        target = apply_adjacent_debug_view(context, 1)
+    elif key == "M":
+        target = apply_debug_view(context, "COMBINED")
     else:
         return None
 
     if target is None:
         return None
 
-    context.area.tag_redraw()
     return target
 
 
@@ -255,7 +507,7 @@ class DEBUGRENDERPASS_OT_cycle(bpy.types.Operator):
         # except a supported Material Preview or Rendered 3D viewport.
         if _debug_shading(context) is None:
             return {"PASS_THROUGH"}
-        if len(available_render_pass_ids(context)) < 2:
+        if len(available_debug_view_ids(context)) < 2:
             return {"PASS_THROUGH"}
         return self.execute(context)
 
@@ -268,14 +520,12 @@ class DEBUGRENDERPASS_OT_cycle(bpy.types.Operator):
             )
             return {"CANCELLED"}
 
-        pass_ids = available_render_pass_ids(context)
         step = -1 if self.direction == "PREVIOUS" else 1
-        target = apply_adjacent_render_pass(shading, step, pass_ids)
+        target = apply_adjacent_debug_view(context, step)
         if target is None:
             self.report({"WARNING"}, "No compatible debug render pass is available")
             return {"CANCELLED"}
 
-        context.area.tag_redraw()
         self.report({"INFO"}, f"Debug Render Pass: {render_pass_label(target)}")
         return {"FINISHED"}
 
@@ -306,17 +556,15 @@ class DEBUGRENDERPASS_OT_set(bpy.types.Operator):
             )
             return {"CANCELLED"}
 
-        if self.pass_id not in available_render_pass_ids(context):
+        if self.pass_id not in available_debug_view_ids(context):
             self.report({"ERROR"}, f"Unsupported render pass: {self.pass_id}")
             return {"CANCELLED"}
 
-        try:
-            shading.render_pass = self.pass_id
-        except (TypeError, ValueError) as error:
-            self.report({"ERROR"}, str(error))
+        target = apply_debug_view(context, self.pass_id)
+        if target is None:
+            self.report({"ERROR"}, f"Could not show debug view: {self.pass_id}")
             return {"CANCELLED"}
 
-        context.area.tag_redraw()
         self.report({"INFO"}, f"Debug Render Pass: {render_pass_label(self.pass_id)}")
         return {"FINISHED"}
 
@@ -344,7 +592,8 @@ class DEBUGRENDERPASS_PT_view3d(bpy.types.Panel):
         column = layout.column(align=True)
         column.enabled = is_usable
         if is_usable:
-            column.label(text=render_pass_label(shading.render_pass), icon="SHADING_RENDERED")
+            current_view = current_debug_view_id(context) or shading.render_pass
+            column.label(text=render_pass_label(current_view), icon="SHADING_RENDERED")
 
         row = column.row(align=True)
         next_pass = row.operator(OPERATOR_CYCLE_ID, text="B  Next", icon="TRIA_RIGHT")
@@ -444,7 +693,14 @@ def _schedule_input_listeners():
 @persistent
 def _load_post_start_input_listeners(_unused):
     _listener_window_ids.clear()
+    _remove_debug_materials()
     _schedule_input_listeners()
+
+
+@persistent
+def _save_pre_remove_debug_materials(_unused):
+    # Runtime override materials must never be written into the user's blend file.
+    _remove_debug_materials()
 
 
 def register():
@@ -455,9 +711,13 @@ def register():
 
     _listener_token = object()
     _listener_enabled = True
+    _remove_debug_materials()
     remove_legacy_user_keymaps()
     if _load_post_start_input_listeners not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_load_post_start_input_listeners)
+    if _save_pre_remove_debug_materials not in bpy.app.handlers.save_pre:
+        bpy.app.handlers.save_pre.append(_save_pre_remove_debug_materials)
+    _register_draw_handler()
     _schedule_input_listeners()
 
 
@@ -467,11 +727,15 @@ def unregister():
     _listener_enabled = False
     _listener_token = object()
     _listener_window_ids.clear()
+    _unregister_draw_handler()
+    _remove_debug_materials()
 
     if bpy.app.timers.is_registered(_start_input_listeners):
         bpy.app.timers.unregister(_start_input_listeners)
     if _load_post_start_input_listeners in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_load_post_start_input_listeners)
+    if _save_pre_remove_debug_materials in bpy.app.handlers.save_pre:
+        bpy.app.handlers.save_pre.remove(_save_pre_remove_debug_materials)
 
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

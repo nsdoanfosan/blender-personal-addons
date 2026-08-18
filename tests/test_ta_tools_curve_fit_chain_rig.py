@@ -5,12 +5,17 @@ import bpy
 MODULE = "ta_tools"
 
 
-def make_curve(name):
+def make_curve(name, reverse=False, spline_type='BEZIER'):
     curve = bpy.data.curves.new(name + "_Curve", type='CURVE')
     curve.dimensions = '3D'
     curve.resolution_u = 16
-    spline = curve.splines.new('BEZIER')
-    spline.bezier_points.add(3)
+    spline = curve.splines.new(spline_type)
+    if spline_type == 'BEZIER':
+        spline.bezier_points.add(3)
+        points = spline.bezier_points
+    else:
+        spline.points.add(3)
+        points = spline.points
 
     coordinates = (
         (0.0, 0.0, 0.0),
@@ -18,10 +23,15 @@ def make_curve(name):
         (3.0, 1.0, 0.2),
         (4.5, 1.5, -0.5),
     )
-    for point, coordinate in zip(spline.bezier_points, coordinates):
-        point.co = coordinate
-        point.handle_left_type = 'AUTO'
-        point.handle_right_type = 'AUTO'
+    if reverse:
+        coordinates = tuple(reversed(coordinates))
+    for point, coordinate in zip(points, coordinates):
+        if spline_type == 'BEZIER':
+            point.co = coordinate
+            point.handle_left_type = 'AUTO'
+            point.handle_right_type = 'AUTO'
+        else:
+            point.co = (*coordinate, 1.0)
 
     obj = bpy.data.objects.new(name, curve)
     bpy.context.scene.collection.objects.link(obj)
@@ -87,6 +97,7 @@ rig = on_mesh.ta_curve_fit_chain_rig
 assert rig is not None
 assert rig.type == 'ARMATURE'
 assert len(rig.data.bones) == 6
+assert rig.data.display_type == 'OCTAHEDRAL'
 
 bone_names = [f"rope_{index:03d}" for index in range(1, 7)]
 assert [bone.name for bone in rig.data.bones] == bone_names
@@ -137,6 +148,47 @@ assert result == {'FINISHED'}
 assert on_mesh.ta_curve_fit_chain_rig == rig
 assert len(rig.data.bones) == 6
 assert_chain_weights(on_mesh, bone_names)
+
+scene.ta_curve_fit_generate_chain_rig = True
+scene.ta_curve_fit_chain_bone_count = 6
+reverse_curve = make_curve("ChainRigReverse", reverse=True, spline_type='POLY')
+select_only(reverse_curve)
+result = bpy.ops.object.ta_create_curve_fit_plane()
+assert result == {'FINISHED'}
+
+reverse_mesh = bpy.context.active_object
+reverse_rig = reverse_mesh.ta_curve_fit_chain_rig
+assert reverse_rig is not None
+assert reverse_rig.data.display_type == 'OCTAHEDRAL'
+
+root_world = reverse_rig.matrix_world @ reverse_rig.data.bones[0].head_local
+chain_end_world = reverse_rig.matrix_world @ reverse_rig.data.bones[-1].tail_local
+curve_origin_world = reverse_curve.matrix_world.translation
+source_first_world = reverse_curve.matrix_world @ reverse_curve.data.splines[0].points[0].co.xyz
+assert (root_world - curve_origin_world).length <= 0.00001
+assert (chain_end_world - source_first_world).length <= 0.00001
+
+axis_values = [vertex.co.x for vertex in reverse_mesh.data.vertices]
+axis_min = min(axis_values)
+axis_max = max(axis_values)
+tolerance = max(axis_max - axis_min, 1.0) * 0.000001
+group_names = {group.index: group.name for group in reverse_mesh.vertex_groups}
+
+for vertex in reverse_mesh.data.vertices:
+    if abs(vertex.co.x - axis_min) <= tolerance:
+        weighted_names = {
+            group_names[element.group]
+            for element in vertex.groups
+            if element.weight > 0.99999
+        }
+        assert weighted_names == {"rope_006"}
+    elif abs(vertex.co.x - axis_max) <= tolerance:
+        weighted_names = {
+            group_names[element.group]
+            for element in vertex.groups
+            if element.weight > 0.99999
+        }
+        assert weighted_names == {"rope_001"}
 
 addon_utils.disable(MODULE, default_set=False)
 print("TA_TOOLS_CURVE_FIT_CHAIN_RIG_OK")

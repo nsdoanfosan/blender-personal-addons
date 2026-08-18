@@ -1,7 +1,7 @@
 bl_info = {
     "name": "TA Tools",
     "author": "PARK",
-    "version": (1, 2, 0),
+    "version": (1, 2, 1),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar; Ctrl+Shift+J",
     "description": "Personal collection, naming, linked object, mesh utilities, and quick menu",

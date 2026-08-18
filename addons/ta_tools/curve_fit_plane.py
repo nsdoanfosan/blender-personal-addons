@@ -167,7 +167,17 @@ def _resample_polyline_by_length(points, sample_count):
 def _sample_chain_points_world(curve_obj, bone_count):
     _chain_source_spline(curve_obj)
     points, _curve_length = _sample_curve_points_world(curve_obj)
-    return _resample_polyline_by_length(points, bone_count + 1)
+    sampled_points, curve_length = _resample_polyline_by_length(points, bone_count + 1)
+
+    curve_origin = curve_obj.matrix_world.translation
+    reverse_direction = (
+        (sampled_points[-1] - curve_origin).length_squared
+        < (sampled_points[0] - curve_origin).length_squared
+    )
+    if reverse_direction:
+        sampled_points.reverse()
+
+    return sampled_points, curve_length, reverse_direction
 
 
 def _adaptive_curve_cut_fractions(curve_obj, segment_count, curvature_boost, end_boost):
@@ -633,7 +643,13 @@ def _ensure_chain_armature_modifier(obj, curve_modifier, rig_obj):
     return armature_modifier
 
 
-def _assign_chain_weights(obj, deform_axis, bone_names, old_bone_names=()):
+def _assign_chain_weights(
+    obj,
+    deform_axis,
+    bone_names,
+    old_bone_names=(),
+    reverse_direction=False,
+):
     axis_index, is_positive_axis = _axis_info(deform_axis)
     if axis_index is None:
         raise ValueError("Unsupported Curve modifier deform axis")
@@ -664,6 +680,8 @@ def _assign_chain_weights(obj, deform_axis, bone_names, old_bone_names=()):
             progress = (max_axis - vertex.co[axis_index]) / axis_length
 
         progress = max(0.0, min(1.0, progress))
+        if reverse_direction:
+            progress = 1.0 - progress
         center_position = progress * bone_count - 0.5
 
         if center_position <= 0.0:
@@ -687,7 +705,7 @@ def create_or_update_chain_rig(context, obj, curve_modifier, bone_count):
         raise ValueError("Curve modifier has no valid curve target")
 
     bone_count = max(2, int(bone_count))
-    world_points, curve_length = _sample_chain_points_world(curve_obj, bone_count)
+    world_points, curve_length, reverse_direction = _sample_chain_points_world(curve_obj, bone_count)
     rig_obj = _chain_rig_for_mesh(obj)
 
     if rig_obj is None:
@@ -742,7 +760,7 @@ def create_or_update_chain_rig(context, obj, curve_modifier, bone_count):
     bpy.ops.object.mode_set(mode='OBJECT')
 
     rig_obj.show_in_front = True
-    armature.display_type = 'BBONE'
+    armature.display_type = 'OCTAHEDRAL'
     rig_obj[_CHAIN_RIG_MARKER] = True
     rig_obj[_CHAIN_BONE_COUNT] = bone_count
     rig_obj.ta_curve_fit_source_curve = curve_obj
@@ -750,7 +768,13 @@ def create_or_update_chain_rig(context, obj, curve_modifier, bone_count):
     obj.ta_curve_fit_chain_rig = rig_obj
 
     _ensure_chain_armature_modifier(obj, curve_modifier, rig_obj)
-    _assign_chain_weights(obj, curve_modifier.deform_axis, bone_names, old_bone_names)
+    _assign_chain_weights(
+        obj,
+        curve_modifier.deform_axis,
+        bone_names,
+        old_bone_names,
+        reverse_direction,
+    )
 
     rig_obj.select_set(False)
     obj.select_set(True)

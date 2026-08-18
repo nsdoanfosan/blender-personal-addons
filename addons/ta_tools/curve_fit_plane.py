@@ -8,6 +8,13 @@ from mathutils.geometry import interpolate_bezier
 
 _CHAIN_RIG_MARKER = "_ta_curve_fit_generated_chain_rig"
 _CHAIN_BONE_COUNT = "_ta_curve_fit_chain_bone_count"
+_FIT_SHAPE_MARKER = "_ta_curve_fit_generated_shape"
+_FIT_SHAPE_CYCLIC = "_ta_curve_fit_cyclic"
+_FIT_SHAPE_TYPE = "_ta_curve_fit_shape_type"
+_FIT_SHAPE_WIDTH = "_ta_curve_fit_width"
+_FIT_SHAPE_HEIGHT = "_ta_curve_fit_height"
+_FIT_SHAPE_RADIUS = "_ta_curve_fit_radius"
+_FIT_SHAPE_SIDES = "_ta_curve_fit_sides"
 
 
 def _point_co(point):
@@ -307,6 +314,23 @@ def _shape_axis_setup(deform_axis):
     return axis_index, cross_axes[0], cross_axes[1], sign
 
 
+def _curve_fit_is_cyclic(curve_obj):
+    usable_splines = []
+
+    for spline in curve_obj.data.splines:
+        if spline.type == 'BEZIER' and len(spline.bezier_points) >= 2:
+            usable_splines.append(spline)
+        elif spline.type in {'POLY', 'NURBS'} and len(spline.points) >= 2:
+            usable_splines.append(spline)
+
+    cyclic_splines = [spline for spline in usable_splines if spline.use_cyclic_u]
+    if not cyclic_splines:
+        return False
+    if len(usable_splines) != 1:
+        raise ValueError("Cyclic Curve Fit Shape requires exactly one spline")
+    return True
+
+
 def _shape_vertex(axis_index, cross_a_index, cross_b_index, length_value, cross_a, cross_b):
     co = [0.0, 0.0, 0.0]
     co[axis_index] = length_value
@@ -315,7 +339,16 @@ def _shape_vertex(axis_index, cross_a_index, cross_b_index, length_value, cross_
     return tuple(co)
 
 
-def _set_curve_fit_uvs(mesh, axis_index, cross_a_index, cross_b_index, axis_span, cross_a_span, cross_b_span):
+def _set_curve_fit_uvs(
+    mesh,
+    axis_index,
+    cross_a_index,
+    cross_b_index,
+    axis_span,
+    cross_a_span,
+    cross_b_span,
+    cyclic=False,
+):
     uv_layer = mesh.uv_layers.new(name="UVMap")
     axis_span = axis_span if abs(axis_span) > 0.000001 else 1.0
     cross_a_span = cross_a_span if abs(cross_a_span) > 0.000001 else 1.0
@@ -323,9 +356,16 @@ def _set_curve_fit_uvs(mesh, axis_index, cross_a_index, cross_b_index, axis_span
 
     for polygon in mesh.polygons:
         use_b_axis = abs(polygon.normal[cross_b_index]) < abs(polygon.normal[cross_a_index])
+        polygon_u_values = [
+            mesh.vertices[mesh.loops[loop_index].vertex_index].co[axis_index] / axis_span
+            for loop_index in polygon.loop_indices
+        ]
+        wraps_u = cyclic and max(polygon_u_values) - min(polygon_u_values) > 0.5
         for loop_index in polygon.loop_indices:
             vert = mesh.vertices[mesh.loops[loop_index].vertex_index]
             u = vert.co[axis_index] / axis_span
+            if wraps_u and u < 0.5:
+                u += 1.0
             if use_b_axis:
                 v = (vert.co[cross_b_index] / cross_b_span) + 0.5
             else:
@@ -333,24 +373,46 @@ def _set_curve_fit_uvs(mesh, axis_index, cross_a_index, cross_b_index, axis_span
             uv_layer.data[loop_index].uv = (u, v)
 
 
-def _build_plane_shape(length, width, segments, axis_index, cross_a_index, cross_b_index, sign):
+def _build_plane_shape(
+    length,
+    width,
+    segments,
+    axis_index,
+    cross_a_index,
+    cross_b_index,
+    sign,
+    cyclic=False,
+):
     verts = []
     faces = []
+    ring_count = segments if cyclic else segments + 1
 
-    for index in range(segments + 1):
+    for index in range(ring_count):
         length_value = sign * length * (index / segments)
         verts.append(_shape_vertex(axis_index, cross_a_index, cross_b_index, length_value, -width * 0.5, 0.0))
         verts.append(_shape_vertex(axis_index, cross_a_index, cross_b_index, length_value, width * 0.5, 0.0))
 
     for index in range(segments):
-        faces.append((index * 2, index * 2 + 1, index * 2 + 3, index * 2 + 2))
+        next_index = (index + 1) % ring_count
+        faces.append((index * 2, index * 2 + 1, next_index * 2 + 1, next_index * 2))
 
     return verts, faces, width, width
 
 
-def _build_box_shape(length, width, height, segments, axis_index, cross_a_index, cross_b_index, sign):
+def _build_box_shape(
+    length,
+    width,
+    height,
+    segments,
+    axis_index,
+    cross_a_index,
+    cross_b_index,
+    sign,
+    cyclic=False,
+):
     verts = []
     faces = []
+    ring_count = segments if cyclic else segments + 1
     corners = (
         (-width * 0.5, -height * 0.5),
         (width * 0.5, -height * 0.5),
@@ -358,14 +420,14 @@ def _build_box_shape(length, width, height, segments, axis_index, cross_a_index,
         (-width * 0.5, height * 0.5),
     )
 
-    for index in range(segments + 1):
+    for index in range(ring_count):
         length_value = sign * length * (index / segments)
         for cross_a, cross_b in corners:
             verts.append(_shape_vertex(axis_index, cross_a_index, cross_b_index, length_value, cross_a, cross_b))
 
     for index in range(segments):
         ring = index * 4
-        next_ring = (index + 1) * 4
+        next_ring = ((index + 1) % ring_count) * 4
         for corner_index in range(4):
             next_corner = (corner_index + 1) % 4
             faces.append((
@@ -375,19 +437,31 @@ def _build_box_shape(length, width, height, segments, axis_index, cross_a_index,
                 next_ring + corner_index,
             ))
 
-    faces.append((3, 2, 1, 0))
-    end = segments * 4
-    faces.append((end, end + 1, end + 2, end + 3))
+    if not cyclic:
+        faces.append((3, 2, 1, 0))
+        end = segments * 4
+        faces.append((end, end + 1, end + 2, end + 3))
 
     return verts, faces, width, height
 
 
-def _build_cylinder_shape(length, radius, sides, segments, axis_index, cross_a_index, cross_b_index, sign):
+def _build_cylinder_shape(
+    length,
+    radius,
+    sides,
+    segments,
+    axis_index,
+    cross_a_index,
+    cross_b_index,
+    sign,
+    cyclic=False,
+):
     verts = []
     faces = []
     sides = max(3, sides)
+    ring_count = segments if cyclic else segments + 1
 
-    for index in range(segments + 1):
+    for index in range(ring_count):
         length_value = sign * length * (index / segments)
         for side_index in range(sides):
             angle = (math.tau * side_index) / sides
@@ -397,7 +471,7 @@ def _build_cylinder_shape(length, radius, sides, segments, axis_index, cross_a_i
 
     for index in range(segments):
         ring = index * sides
-        next_ring = (index + 1) * sides
+        next_ring = ((index + 1) % ring_count) * sides
         for side_index in range(sides):
             next_side = (side_index + 1) % sides
             faces.append((
@@ -407,9 +481,10 @@ def _build_cylinder_shape(length, radius, sides, segments, axis_index, cross_a_i
                 next_ring + side_index,
             ))
 
-    faces.append(tuple(reversed(range(sides))))
-    end = segments * sides
-    faces.append(tuple(end + side_index for side_index in range(sides)))
+    if not cyclic:
+        faces.append(tuple(reversed(range(sides))))
+        end = segments * sides
+        faces.append(tuple(end + side_index for side_index in range(sides)))
 
     diameter = radius * 2.0
     return verts, faces, diameter, diameter
@@ -431,7 +506,8 @@ def create_curve_fit_shape(
         raise ValueError("Curve length is zero")
 
     axis_index, cross_a_index, cross_b_index, sign = _shape_axis_setup(deform_axis)
-    segments = max(1, segments)
+    cyclic = _curve_fit_is_cyclic(curve_obj)
+    segments = max(3 if cyclic else 1, segments)
 
     if shape_type == 'PLANE':
         verts, faces, cross_a_span, cross_b_span = _build_plane_shape(
@@ -442,6 +518,7 @@ def create_curve_fit_shape(
             cross_a_index,
             cross_b_index,
             sign,
+            cyclic,
         )
         object_name = "Curve_Fit_Plane"
     elif shape_type == 'CYLINDER':
@@ -454,6 +531,7 @@ def create_curve_fit_shape(
             cross_a_index,
             cross_b_index,
             sign,
+            cyclic,
         )
         object_name = "Curve_Fit_Cylinder"
     elif shape_type == 'BOX':
@@ -466,6 +544,7 @@ def create_curve_fit_shape(
             cross_a_index,
             cross_b_index,
             sign,
+            cyclic,
         )
         object_name = "Curve_Fit_Box"
     else:
@@ -484,6 +563,13 @@ def create_curve_fit_shape(
     modifier.object = curve_obj
     modifier.deform_axis = deform_axis
     obj.ta_curve_fit_source_curve = curve_obj
+    obj[_FIT_SHAPE_MARKER] = True
+    obj[_FIT_SHAPE_CYCLIC] = cyclic
+    obj[_FIT_SHAPE_TYPE] = shape_type
+    obj[_FIT_SHAPE_WIDTH] = width
+    obj[_FIT_SHAPE_HEIGHT] = height
+    obj[_FIT_SHAPE_RADIUS] = radius
+    obj[_FIT_SHAPE_SIDES] = sides
     curve_obj.show_in_front = True
 
     _set_curve_fit_uvs(
@@ -494,6 +580,7 @@ def create_curve_fit_shape(
         sign * length,
         cross_a_span,
         cross_b_span,
+        cyclic,
     )
 
     for selected in context.selected_objects:
@@ -516,6 +603,86 @@ def create_curve_fit_plane(context, curve_obj, width, segments, deform_axis):
         segments,
         deform_axis,
     )
+
+
+def rebuild_generated_cyclic_shape(obj, modifier, segment_length):
+    if not obj.get(_FIT_SHAPE_MARKER, False) or not obj.get(_FIT_SHAPE_CYCLIC, False):
+        return None
+    if segment_length <= 0.0:
+        raise ValueError("Segment length must be greater than zero")
+
+    curve_obj = modifier.object
+    if curve_obj is None or curve_obj.type != 'CURVE' or not _curve_fit_is_cyclic(curve_obj):
+        raise ValueError("The generated cyclic shape requires one cyclic source spline")
+
+    length = _curve_local_length(curve_obj)
+    if length <= 0.0:
+        raise ValueError("Curve length is zero")
+
+    shape_type = obj.get(_FIT_SHAPE_TYPE)
+    if shape_type not in {'PLANE', 'CYLINDER', 'BOX'}:
+        raise ValueError("Cyclic shape metadata is missing; recreate the Curve Fit Shape")
+
+    segments = max(3, math.ceil(length / segment_length))
+    axis_index, cross_a_index, cross_b_index, sign = _shape_axis_setup(modifier.deform_axis)
+    width = float(obj.get(_FIT_SHAPE_WIDTH, 0.0))
+    height = float(obj.get(_FIT_SHAPE_HEIGHT, 0.0))
+    radius = float(obj.get(_FIT_SHAPE_RADIUS, 0.0))
+    sides = max(3, int(obj.get(_FIT_SHAPE_SIDES, 3)))
+
+    if shape_type == 'PLANE':
+        verts, faces, cross_a_span, cross_b_span = _build_plane_shape(
+            length,
+            width,
+            segments,
+            axis_index,
+            cross_a_index,
+            cross_b_index,
+            sign,
+            True,
+        )
+    elif shape_type == 'CYLINDER':
+        verts, faces, cross_a_span, cross_b_span = _build_cylinder_shape(
+            length,
+            radius,
+            sides,
+            segments,
+            axis_index,
+            cross_a_index,
+            cross_b_index,
+            sign,
+            True,
+        )
+    else:
+        verts, faces, cross_a_span, cross_b_span = _build_box_shape(
+            length,
+            width,
+            height,
+            segments,
+            axis_index,
+            cross_a_index,
+            cross_b_index,
+            sign,
+            True,
+        )
+
+    mesh = obj.data
+    mesh.clear_geometry()
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+    while mesh.uv_layers:
+        mesh.uv_layers.remove(mesh.uv_layers[0])
+    _set_curve_fit_uvs(
+        mesh,
+        axis_index,
+        cross_a_index,
+        cross_b_index,
+        sign * length,
+        cross_a_span,
+        cross_b_span,
+        True,
+    )
+    return segments, length
 
 
 def _curve_modifier_for_object(obj, curve_obj=None):
@@ -1026,8 +1193,15 @@ class TA_OT_fit_object_to_curve(bpy.types.Operator):
             self.report({'WARNING'}, "Select a mesh with a Curve modifier, or select its target curve.")
             return {'CANCELLED'}
 
+        generated_cyclic = (
+            obj.get(_FIT_SHAPE_MARKER, False)
+            and obj.get(_FIT_SHAPE_CYCLIC, False)
+        )
         existing_rig = _chain_rig_for_mesh(obj)
-        should_update_rig = context.scene.ta_curve_fit_generate_chain_rig or existing_rig is not None
+        should_update_rig = (
+            not generated_cyclic
+            and (context.scene.ta_curve_fit_generate_chain_rig or existing_rig is not None)
+        )
         if context.scene.ta_curve_fit_generate_chain_rig or existing_rig is None:
             rig_bone_count = context.scene.ta_curve_fit_chain_bone_count
         else:
@@ -1095,14 +1269,22 @@ class TA_OT_segment_object_by_length(bpy.types.Operator):
             if should_update_rig:
                 _sample_chain_points_world(modifier.object, rig_bone_count)
 
-            cut_count, axis_length = segment_mesh_by_length(
-                obj,
-                axis_index,
-                _cm_to_scene_units(context, context.scene.ta_curve_fit_existing_segment_length_cm),
-                modifier.object,
-                context.scene.ta_curve_fit_curvature_boost,
-                context.scene.ta_curve_fit_end_boost,
+            segment_length = _cm_to_scene_units(
+                context,
+                context.scene.ta_curve_fit_existing_segment_length_cm,
             )
+            cyclic_result = rebuild_generated_cyclic_shape(obj, modifier, segment_length)
+            if cyclic_result is not None:
+                cut_count, axis_length = cyclic_result
+            else:
+                cut_count, axis_length = segment_mesh_by_length(
+                    obj,
+                    axis_index,
+                    segment_length,
+                    modifier.object,
+                    context.scene.ta_curve_fit_curvature_boost,
+                    context.scene.ta_curve_fit_end_boost,
+                )
 
             if should_update_rig:
                 create_or_update_chain_rig(

@@ -8,8 +8,9 @@ junctions.
 - `addons/ta_tools`: collection export, linked object, collection move, rename,
   alpha image silhouette mesh, and mesh utility tools. Curve Fit Shape can
   optionally generate an arc-length chain rig with smooth rope weights; the
-  option is off by default. Press `Ctrl+Shift+J` in the 3D View to open the
-  panel-style TA Quick Menu.
+  option is off by default. Cyclic source splines generate truly closed fitted
+  topology with a wrapped UV seam and cyclic-safe segment rebuilding. Press
+  `Ctrl+Shift+J` in the 3D View to open the panel-style TA Quick Menu.
 - `addons/ta_uv_tools`: UV fit, 90 degree rotation, and material border seam tools.
 - `addons/align_object`: clicked-object alignment tool.
 - `addons/toggle_selected_edge_marks`: seam, bevel weight, and sharp toggles.

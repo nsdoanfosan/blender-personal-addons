@@ -1,9 +1,13 @@
 import bpy
 import bmesh
 import math
-from bpy.props import EnumProperty, FloatProperty, IntProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty
 from mathutils import Matrix, Vector
 from mathutils.geometry import interpolate_bezier
+
+
+_CHAIN_RIG_MARKER = "_ta_curve_fit_generated_chain_rig"
+_CHAIN_BONE_COUNT = "_ta_curve_fit_chain_bone_count"
 
 
 def _point_co(point):
@@ -106,6 +110,64 @@ def _sample_curve_points_world(curve_obj):
             best_length = length
 
     return best_points, best_length
+
+
+def _chain_source_spline(curve_obj):
+    usable_splines = []
+
+    for spline in curve_obj.data.splines:
+        if spline.type == 'BEZIER' and len(spline.bezier_points) >= 2:
+            usable_splines.append(spline)
+        elif spline.type == 'POLY' and len(spline.points) >= 2:
+            usable_splines.append(spline)
+
+    if len(usable_splines) != 1:
+        raise ValueError("Chain Rig requires exactly one open Bezier or Poly spline")
+
+    spline = usable_splines[0]
+    if spline.use_cyclic_u:
+        raise ValueError("Chain Rig does not support cyclic splines")
+
+    return spline
+
+
+def _resample_polyline_by_length(points, sample_count):
+    if len(points) < 2 or sample_count < 2:
+        raise ValueError("Curve does not contain enough points for a Chain Rig")
+
+    cumulative_lengths = [0.0]
+    for index in range(1, len(points)):
+        cumulative_lengths.append(
+            cumulative_lengths[-1] + (points[index] - points[index - 1]).length
+        )
+
+    total_length = cumulative_lengths[-1]
+    if total_length <= 0.000001:
+        raise ValueError("Curve length is zero")
+
+    result = []
+    segment_index = 1
+
+    for sample_index in range(sample_count):
+        target_length = total_length * (sample_index / (sample_count - 1))
+
+        while segment_index < len(cumulative_lengths) - 1 and cumulative_lengths[segment_index] < target_length:
+            segment_index += 1
+
+        previous_index = max(0, segment_index - 1)
+        segment_start = cumulative_lengths[previous_index]
+        segment_end = cumulative_lengths[segment_index]
+        segment_length = segment_end - segment_start
+        factor = (target_length - segment_start) / segment_length if segment_length > 0.000001 else 0.0
+        result.append(points[previous_index].lerp(points[segment_index], factor))
+
+    return result, total_length
+
+
+def _sample_chain_points_world(curve_obj, bone_count):
+    _chain_source_spline(curve_obj)
+    points, _curve_length = _sample_curve_points_world(curve_obj)
+    return _resample_polyline_by_length(points, bone_count + 1)
 
 
 def _adaptive_curve_cut_fractions(curve_obj, segment_count, curvature_boost, end_boost):
@@ -411,6 +473,7 @@ def create_curve_fit_shape(
     modifier = obj.modifiers.new("Follow Curve", 'CURVE')
     modifier.object = curve_obj
     modifier.deform_axis = deform_axis
+    obj.ta_curve_fit_source_curve = curve_obj
     curve_obj.show_in_front = True
 
     _set_curve_fit_uvs(
@@ -511,6 +574,190 @@ def _apply_scale_to_mesh_data(obj):
 def _matrix_without_scale(matrix):
     location, rotation, _scale = matrix.decompose()
     return Matrix.LocRotScale(location, rotation, (1.0, 1.0, 1.0))
+
+
+def _chain_rig_for_mesh(obj):
+    if obj is None or obj.type != 'MESH':
+        return None
+
+    rig = getattr(obj, "ta_curve_fit_chain_rig", None)
+    if rig is not None and rig.type == 'ARMATURE':
+        return rig
+
+    for modifier in obj.modifiers:
+        if (
+            modifier.type == 'ARMATURE'
+            and modifier.object is not None
+            and modifier.object.type == 'ARMATURE'
+            and modifier.object.get(_CHAIN_RIG_MARKER, False)
+        ):
+            return modifier.object
+
+    return None
+
+
+def _chain_normal_for_tangent(reference_normal, tangent):
+    tangent = tangent.normalized()
+    normal = reference_normal - tangent * reference_normal.dot(tangent)
+
+    if normal.length <= 0.000001:
+        for fallback in (Vector((0.0, 0.0, 1.0)), Vector((0.0, 1.0, 0.0)), Vector((1.0, 0.0, 0.0))):
+            normal = fallback - tangent * fallback.dot(tangent)
+            if normal.length > 0.000001:
+                break
+
+    return normal.normalized()
+
+
+def _ensure_chain_armature_modifier(obj, curve_modifier, rig_obj):
+    armature_modifier = None
+    for modifier in obj.modifiers:
+        if modifier.type == 'ARMATURE' and modifier.object == rig_obj:
+            armature_modifier = modifier
+            break
+
+    if armature_modifier is not None:
+        curve_index = obj.modifiers.find(curve_modifier.name)
+        armature_index = obj.modifiers.find(armature_modifier.name)
+        if armature_index <= curve_index:
+            obj.modifiers.remove(armature_modifier)
+            armature_modifier = None
+
+    if armature_modifier is None:
+        armature_modifier = obj.modifiers.new("Chain Rig", 'ARMATURE')
+
+    armature_modifier.object = rig_obj
+    armature_modifier.use_vertex_groups = True
+    armature_modifier.use_bone_envelopes = False
+    armature_modifier.use_deform_preserve_volume = False
+    return armature_modifier
+
+
+def _assign_chain_weights(obj, deform_axis, bone_names, old_bone_names=()):
+    axis_index, is_positive_axis = _axis_info(deform_axis)
+    if axis_index is None:
+        raise ValueError("Unsupported Curve modifier deform axis")
+
+    axis_values = [vertex.co[axis_index] for vertex in obj.data.vertices]
+    if not axis_values:
+        raise ValueError("Object mesh has no vertices")
+
+    min_axis = min(axis_values)
+    max_axis = max(axis_values)
+    axis_length = max_axis - min_axis
+    if axis_length <= 0.000001:
+        raise ValueError("Object has no length on the Curve modifier axis")
+
+    owned_group_names = set(old_bone_names) | set(bone_names)
+    for group_name in owned_group_names:
+        group = obj.vertex_groups.get(group_name)
+        if group is not None:
+            obj.vertex_groups.remove(group)
+
+    groups = [obj.vertex_groups.new(name=bone_name) for bone_name in bone_names]
+    bone_count = len(groups)
+
+    for vertex in obj.data.vertices:
+        if is_positive_axis:
+            progress = (vertex.co[axis_index] - min_axis) / axis_length
+        else:
+            progress = (max_axis - vertex.co[axis_index]) / axis_length
+
+        progress = max(0.0, min(1.0, progress))
+        center_position = progress * bone_count - 0.5
+
+        if center_position <= 0.0:
+            groups[0].add([vertex.index], 1.0, 'REPLACE')
+            continue
+
+        if center_position >= bone_count - 1:
+            groups[-1].add([vertex.index], 1.0, 'REPLACE')
+            continue
+
+        lower_index = int(math.floor(center_position))
+        blend = center_position - lower_index
+        blend = blend * blend * (3.0 - 2.0 * blend)
+        groups[lower_index].add([vertex.index], 1.0 - blend, 'REPLACE')
+        groups[lower_index + 1].add([vertex.index], blend, 'REPLACE')
+
+
+def create_or_update_chain_rig(context, obj, curve_modifier, bone_count):
+    curve_obj = curve_modifier.object
+    if curve_obj is None or curve_obj.type != 'CURVE':
+        raise ValueError("Curve modifier has no valid curve target")
+
+    bone_count = max(2, int(bone_count))
+    world_points, curve_length = _sample_chain_points_world(curve_obj, bone_count)
+    rig_obj = _chain_rig_for_mesh(obj)
+
+    if rig_obj is None:
+        armature = bpy.data.armatures.new(f"{curve_obj.name}_ChainRig_Armature")
+        rig_obj = bpy.data.objects.new(f"{curve_obj.name}_ChainRig", armature)
+        target_collection = obj.users_collection[0] if obj.users_collection else context.collection
+        target_collection.objects.link(rig_obj)
+        old_bone_names = []
+    else:
+        armature = rig_obj.data
+        old_bone_names = [bone.name for bone in armature.bones]
+
+    rig_matrix = _matrix_without_scale(curve_obj.matrix_world)
+    rig_obj.matrix_world = rig_matrix
+    inverse_rig_matrix = rig_matrix.inverted_safe()
+    local_points = [inverse_rig_matrix @ point for point in world_points]
+
+    for selected in list(context.selected_objects):
+        selected.select_set(False)
+    rig_obj.hide_set(False)
+    rig_obj.hide_viewport = False
+    rig_obj.select_set(True)
+    context.view_layer.objects.active = rig_obj
+    bpy.ops.object.mode_set(mode='EDIT')
+
+    for edit_bone in list(armature.edit_bones):
+        armature.edit_bones.remove(edit_bone)
+
+    bone_names = []
+    previous_bone = None
+    reference_normal = Vector((0.0, 0.0, 1.0))
+
+    for index in range(bone_count):
+        head = local_points[index]
+        tail = local_points[index + 1]
+        tangent = tail - head
+        if tangent.length <= 0.000001:
+            bpy.ops.object.mode_set(mode='OBJECT')
+            raise ValueError("Curve contains a zero-length Chain Rig segment")
+
+        edit_bone = armature.edit_bones.new(f"rope_{index + 1:03d}")
+        edit_bone.head = head
+        edit_bone.tail = tail
+        edit_bone.parent = previous_bone
+        edit_bone.use_connect = previous_bone is not None
+
+        reference_normal = _chain_normal_for_tangent(reference_normal, tangent)
+        edit_bone.align_roll(reference_normal)
+        bone_names.append(edit_bone.name)
+        previous_bone = edit_bone
+
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+    rig_obj.show_in_front = True
+    armature.display_type = 'BBONE'
+    rig_obj[_CHAIN_RIG_MARKER] = True
+    rig_obj[_CHAIN_BONE_COUNT] = bone_count
+    rig_obj.ta_curve_fit_source_curve = curve_obj
+    obj.ta_curve_fit_source_curve = curve_obj
+    obj.ta_curve_fit_chain_rig = rig_obj
+
+    _ensure_chain_armature_modifier(obj, curve_modifier, rig_obj)
+    _assign_chain_weights(obj, curve_modifier.deform_axis, bone_names, old_bone_names)
+
+    rig_obj.select_set(False)
+    obj.select_set(True)
+    context.view_layer.objects.active = obj
+    context.view_layer.update()
+
+    return rig_obj, bone_names, curve_length
 
 
 def _center_mesh_cross_section(obj, deform_axis_index):
@@ -704,8 +951,12 @@ class TA_OT_create_curve_fit_plane(bpy.types.Operator):
     def execute(self, context):
         scene = context.scene
         curve_obj = context.active_object
+        rig_obj = None
 
         try:
+            if scene.ta_curve_fit_generate_chain_rig:
+                _sample_chain_points_world(curve_obj, scene.ta_curve_fit_chain_bone_count)
+
             obj, length = create_curve_fit_shape(
                 context,
                 curve_obj,
@@ -717,11 +968,21 @@ class TA_OT_create_curve_fit_plane(bpy.types.Operator):
                 scene.ta_curve_fit_plane_segments,
                 scene.ta_curve_fit_plane_deform_axis,
             )
+
+            if scene.ta_curve_fit_generate_chain_rig:
+                modifier = _curve_modifier_for_object(obj, curve_obj)
+                rig_obj, _bone_names, _rig_length = create_or_update_chain_rig(
+                    context,
+                    obj,
+                    modifier,
+                    scene.ta_curve_fit_chain_bone_count,
+                )
         except ValueError as exc:
             self.report({'WARNING'}, str(exc))
             return {'CANCELLED'}
 
-        self.report({'INFO'}, f"Created {obj.name} / length {length:.4f}")
+        rig_message = f" / rig {rig_obj.name}" if rig_obj is not None else ""
+        self.report({'INFO'}, f"Created {obj.name} / length {length:.4f}{rig_message}")
         return {'FINISHED'}
 
 
@@ -741,8 +1002,29 @@ class TA_OT_fit_object_to_curve(bpy.types.Operator):
             self.report({'WARNING'}, "Select a mesh with a Curve modifier, or select its target curve.")
             return {'CANCELLED'}
 
+        existing_rig = _chain_rig_for_mesh(obj)
+        should_update_rig = context.scene.ta_curve_fit_generate_chain_rig or existing_rig is not None
+        if context.scene.ta_curve_fit_generate_chain_rig or existing_rig is None:
+            rig_bone_count = context.scene.ta_curve_fit_chain_bone_count
+        else:
+            rig_bone_count = int(existing_rig.get(
+                _CHAIN_BONE_COUNT,
+                context.scene.ta_curve_fit_chain_bone_count,
+            ))
+
         try:
+            if should_update_rig:
+                _sample_chain_points_world(modifier.object, rig_bone_count)
+
             curve_obj, length = fit_object_to_curve_modifier(context, obj, modifier)
+
+            if should_update_rig:
+                create_or_update_chain_rig(
+                    context,
+                    obj,
+                    modifier,
+                    rig_bone_count,
+                )
         except ValueError as exc:
             self.report({'WARNING'}, str(exc))
             return {'CANCELLED'}
@@ -767,6 +1049,16 @@ class TA_OT_segment_object_by_length(bpy.types.Operator):
             self.report({'WARNING'}, "Select a mesh with a Curve modifier, or select its target curve.")
             return {'CANCELLED'}
 
+        existing_rig = _chain_rig_for_mesh(obj)
+        should_update_rig = context.scene.ta_curve_fit_generate_chain_rig or existing_rig is not None
+        if context.scene.ta_curve_fit_generate_chain_rig or existing_rig is None:
+            rig_bone_count = context.scene.ta_curve_fit_chain_bone_count
+        else:
+            rig_bone_count = int(existing_rig.get(
+                _CHAIN_BONE_COUNT,
+                context.scene.ta_curve_fit_chain_bone_count,
+            ))
+
         axis_index, _is_positive_axis = _axis_info(modifier.deform_axis)
         if axis_index is None:
             self.report({'WARNING'}, "Unsupported Curve modifier deform axis")
@@ -776,6 +1068,9 @@ class TA_OT_segment_object_by_length(bpy.types.Operator):
             obj.data = obj.data.copy()
 
         try:
+            if should_update_rig:
+                _sample_chain_points_world(modifier.object, rig_bone_count)
+
             cut_count, axis_length = segment_mesh_by_length(
                 obj,
                 axis_index,
@@ -784,11 +1079,53 @@ class TA_OT_segment_object_by_length(bpy.types.Operator):
                 context.scene.ta_curve_fit_curvature_boost,
                 context.scene.ta_curve_fit_end_boost,
             )
+
+            if should_update_rig:
+                create_or_update_chain_rig(
+                    context,
+                    obj,
+                    modifier,
+                    rig_bone_count,
+                )
         except ValueError as exc:
             self.report({'WARNING'}, str(exc))
             return {'CANCELLED'}
 
         self.report({'INFO'}, f"Segmented {obj.name}: {cut_count} cuts / length {axis_length:.4f}")
+        return {'FINISHED'}
+
+
+class TA_OT_build_curve_fit_chain_rig(bpy.types.Operator):
+    bl_idname = "object.ta_build_curve_fit_chain_rig"
+    bl_label = "Create / Update Chain Rig"
+    bl_description = "Create or rebuild an arc-length bone chain and smooth longitudinal weights for the fitted mesh"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT'
+
+    def execute(self, context):
+        obj, modifier = _find_curve_fit_target(context)
+        if obj is None or modifier is None:
+            self.report({'WARNING'}, "Select a mesh with a Curve modifier, or select its target curve.")
+            return {'CANCELLED'}
+
+        try:
+            rig_obj, bone_names, curve_length = create_or_update_chain_rig(
+                context,
+                obj,
+                modifier,
+                context.scene.ta_curve_fit_chain_bone_count,
+            )
+        except ValueError as exc:
+            self.report({'WARNING'}, str(exc))
+            return {'CANCELLED'}
+
+        self.report(
+            {'INFO'},
+            f"Updated {rig_obj.name}: {len(bone_names)} bones / length {curve_length:.4f}",
+        )
         return {'FINISHED'}
 
 
@@ -827,6 +1164,13 @@ class TA_PT_curve_fit_plane_panel(bpy.types.Panel):
         row.enabled = obj is not None and obj.type == 'CURVE'
         row.operator("object.ta_create_curve_fit_plane", icon='MOD_CURVE')
 
+        rig_box = layout.box()
+        rig_box.prop(scene, "ta_curve_fit_generate_chain_rig")
+        if scene.ta_curve_fit_generate_chain_rig:
+            rig_col = rig_box.column(align=True)
+            rig_col.prop(scene, "ta_curve_fit_chain_bone_count")
+            rig_col.operator("object.ta_build_curve_fit_chain_rig", icon='ARMATURE_DATA')
+
         fit_row = layout.row()
         fit_row.operator("object.ta_fit_object_to_curve", icon='CURVE_DATA')
 
@@ -841,11 +1185,22 @@ classes = (
     TA_OT_create_curve_fit_plane,
     TA_OT_fit_object_to_curve,
     TA_OT_segment_object_by_length,
+    TA_OT_build_curve_fit_chain_rig,
     TA_PT_curve_fit_plane_panel,
 )
 
 
 def register():
+    bpy.types.Object.ta_curve_fit_source_curve = PointerProperty(
+        name="Curve Fit Source",
+        type=bpy.types.Object,
+        description="Source curve used by this Curve Fit Shape or Chain Rig",
+    )
+    bpy.types.Object.ta_curve_fit_chain_rig = PointerProperty(
+        name="Curve Fit Chain Rig",
+        type=bpy.types.Object,
+        description="Generated armature associated with this Curve Fit Shape",
+    )
     bpy.types.Scene.ta_curve_fit_shape_type = EnumProperty(
         name="Shape",
         default='PLANE',
@@ -905,6 +1260,18 @@ def register():
             ('NEG_Z', '-Z', 'Deform along negative local Z'),
         ),
     )
+    bpy.types.Scene.ta_curve_fit_generate_chain_rig = BoolProperty(
+        name="Generate Chain Rig",
+        default=False,
+        description="Optionally create a bone chain, Armature modifier, and smooth rope weights",
+    )
+    bpy.types.Scene.ta_curve_fit_chain_bone_count = IntProperty(
+        name="Chain Bones",
+        default=12,
+        min=2,
+        soft_max=64,
+        description="Number of deform bones distributed evenly by arc length along the source spline",
+    )
     bpy.types.Scene.ta_curve_fit_existing_segment_length_cm = FloatProperty(
         name="Segment Length (cm)",
         default=5.0,
@@ -941,6 +1308,8 @@ def unregister():
     del bpy.types.Scene.ta_curve_fit_end_boost
     del bpy.types.Scene.ta_curve_fit_curvature_boost
     del bpy.types.Scene.ta_curve_fit_existing_segment_length_cm
+    del bpy.types.Scene.ta_curve_fit_chain_bone_count
+    del bpy.types.Scene.ta_curve_fit_generate_chain_rig
     del bpy.types.Scene.ta_curve_fit_plane_deform_axis
     del bpy.types.Scene.ta_curve_fit_plane_segments
     del bpy.types.Scene.ta_curve_fit_cylinder_sides
@@ -948,3 +1317,5 @@ def unregister():
     del bpy.types.Scene.ta_curve_fit_height_cm
     del bpy.types.Scene.ta_curve_fit_width_cm
     del bpy.types.Scene.ta_curve_fit_shape_type
+    del bpy.types.Object.ta_curve_fit_chain_rig
+    del bpy.types.Object.ta_curve_fit_source_curve

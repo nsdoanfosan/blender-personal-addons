@@ -8,8 +8,11 @@ junctions.
 - `addons/ta_tools`: collection export, linked object, collection move, rename,
   alpha image silhouette mesh, and mesh utility tools. Curve Fit Shape can
   optionally generate an arc-length chain rig with smooth rope weights; the
-  option is off by default. Cyclic source splines generate truly closed fitted
-  topology with a wrapped UV seam and cyclic-safe segment rebuilding. Press
+  option is off by default. An independent **Add End Bone** checkbox (also off
+  by default) adds a connected `rope_end` bone at the hanging end and blends
+  the rope tip into it for payload attachment. Cyclic source splines generate
+  truly closed fitted topology with a wrapped UV seam and cyclic-safe segment
+  rebuilding. Press
   `Ctrl+Shift+J` in the 3D View to open the panel-style TA Quick Menu.
 - `addons/ta_uv_tools`: UV fit, 90 degree rotation, and material border seam tools.
 - `addons/align_object`: clicked-object alignment tool.
@@ -98,6 +101,9 @@ modifier.
 
 The new mesh is aligned to the curve's world transform, receives a full-length
 UV map, and becomes the active object. The Curve modifier remains editable.
+Enable **Generate Chain Rig** to create evenly spaced `rope_###` deform bones
+and smooth longitudinal weights. Enable **Add End Bone** when the hanging end
+needs its own `rope_end` transform for a payload; both options default to off.
 
 ### Vertex Group & Color
 

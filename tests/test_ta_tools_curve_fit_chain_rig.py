@@ -69,6 +69,7 @@ addon_utils.enable(MODULE, default_set=False)
 scene = bpy.context.scene
 
 assert scene.ta_curve_fit_generate_chain_rig is False
+assert scene.ta_curve_fit_add_end_bone is False
 
 scene.ta_curve_fit_shape_type = 'CYLINDER'
 scene.ta_curve_fit_cylinder_sides = 8
@@ -99,11 +100,29 @@ assert rig.type == 'ARMATURE'
 assert len(rig.data.bones) == 6
 assert rig.data.display_type == 'OCTAHEDRAL'
 
-bone_names = [f"rope_{index:03d}" for index in range(1, 7)]
-assert [bone.name for bone in rig.data.bones] == bone_names
+rope_bone_names = [f"rope_{index:03d}" for index in range(1, 7)]
+assert [bone.name for bone in rig.data.bones] == rope_bone_names
 
 modifier_types = [modifier.type for modifier in on_mesh.modifiers]
 assert modifier_types == ['CURVE', 'ARMATURE']
+assert_chain_weights(on_mesh, rope_bone_names)
+
+scene.ta_curve_fit_add_end_bone = True
+select_only(on_mesh)
+result = bpy.ops.object.ta_build_curve_fit_chain_rig()
+assert result == {'FINISHED'}
+
+bone_names = rope_bone_names + ["rope_end"]
+assert on_mesh.ta_curve_fit_chain_rig == rig
+assert len(rig.data.bones) == 7
+assert [bone.name for bone in rig.data.bones] == bone_names
+end_bone = rig.data.bones["rope_end"]
+last_rope_bone = rig.data.bones["rope_006"]
+assert end_bone.parent == last_rope_bone
+assert end_bone.use_connect is True
+assert end_bone.use_deform is True
+assert (end_bone.head_local - last_rope_bone.tail_local).length <= 0.000001
+assert end_bone.length > 0.000001
 assert_chain_weights(on_mesh, bone_names)
 
 armature_modifier = on_mesh.modifiers[-1]
@@ -132,13 +151,14 @@ bpy.context.view_layer.update()
 
 scene.ta_curve_fit_generate_chain_rig = False
 scene.ta_curve_fit_chain_bone_count = 9
+scene.ta_curve_fit_add_end_bone = False
 scene.ta_curve_fit_existing_segment_length_cm = 50.0
 select_only(on_mesh)
 result = bpy.ops.object.ta_segment_object_by_length()
 assert result == {'FINISHED'}
 
 assert on_mesh.ta_curve_fit_chain_rig == rig
-assert len(rig.data.bones) == 6
+assert len(rig.data.bones) == 7
 assert [bone.name for bone in rig.data.bones] == bone_names
 assert_chain_weights(on_mesh, bone_names)
 
@@ -146,11 +166,13 @@ select_only(on_mesh)
 result = bpy.ops.object.ta_fit_object_to_curve()
 assert result == {'FINISHED'}
 assert on_mesh.ta_curve_fit_chain_rig == rig
-assert len(rig.data.bones) == 6
+assert len(rig.data.bones) == 7
+assert [bone.name for bone in rig.data.bones] == bone_names
 assert_chain_weights(on_mesh, bone_names)
 
 scene.ta_curve_fit_generate_chain_rig = True
 scene.ta_curve_fit_chain_bone_count = 6
+scene.ta_curve_fit_add_end_bone = True
 reverse_curve = make_curve("ChainRigReverse", reverse=True, spline_type='POLY')
 select_only(reverse_curve)
 result = bpy.ops.object.ta_create_curve_fit_plane()
@@ -162,11 +184,13 @@ assert reverse_rig is not None
 assert reverse_rig.data.display_type == 'OCTAHEDRAL'
 
 root_world = reverse_rig.matrix_world @ reverse_rig.data.bones[0].head_local
-chain_end_world = reverse_rig.matrix_world @ reverse_rig.data.bones[-1].tail_local
+chain_end_world = reverse_rig.matrix_world @ reverse_rig.data.bones["rope_end"].head_local
+end_tail_world = reverse_rig.matrix_world @ reverse_rig.data.bones["rope_end"].tail_local
 curve_origin_world = reverse_curve.matrix_world.translation
 source_first_world = reverse_curve.matrix_world @ reverse_curve.data.splines[0].points[0].co.xyz
 assert (root_world - curve_origin_world).length <= 0.00001
 assert (chain_end_world - source_first_world).length <= 0.00001
+assert (end_tail_world - chain_end_world).length > 0.00001
 
 axis_values = [vertex.co.x for vertex in reverse_mesh.data.vertices]
 axis_min = min(axis_values)
@@ -181,7 +205,7 @@ for vertex in reverse_mesh.data.vertices:
             for element in vertex.groups
             if element.weight > 0.99999
         }
-        assert weighted_names == {"rope_006"}
+        assert weighted_names == {"rope_end"}
     elif abs(vertex.co.x - axis_max) <= tolerance:
         weighted_names = {
             group_names[element.group]

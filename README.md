@@ -12,8 +12,9 @@ junctions.
   by default) adds a connected `rope_end` bone at the hanging end and blends
   the rope tip into it for payload attachment. Cyclic source splines generate
   truly closed fitted topology with a wrapped UV seam and cyclic-safe segment
-  rebuilding. Press
-  `Ctrl+Shift+J` in the 3D View to open the panel-style TA Quick Menu.
+  rebuilding. Press `Ctrl+Shift+J` in the 3D View to open the panel-style TA
+  Quick Menu. Press `F4` over a 3D View to show or hide the wire overlay while
+  keeping the current viewport shading mode.
 - `addons/ta_uv_tools`: UV fit, 90 degree rotation, and material border seam tools.
 - `addons/align_object`: clicked-object alignment tool.
 - `addons/toggle_selected_edge_marks`: seam, bevel weight, and sharp toggles.
@@ -200,7 +201,8 @@ addons/ta_tools/
 |-- move_collection.py                 # move/link/unlink collection UI
 |-- rename_objects.py                  # selection-based rename dialog
 |-- scene_collection_object_renamer.py # collection-driven scene rename
-`-- ta_tool.py                         # destructive group/color reset + edge cut
+|-- ta_tool.py                         # destructive group/color reset + edge cut
+`-- viewport_wire_overlay.py           # F4 wire overlay toggle
 ```
 
 When adding a module, import it in `__init__.py` and add it to `modules`.

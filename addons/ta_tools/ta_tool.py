@@ -55,6 +55,31 @@ class TA_PT_vertex_color_panel(bpy.types.Panel):
 # ② Max-style Connect Edge (신규 엣지만 선택)
 # ─────────────────────────────────────────────
 
+def _ta_geometry_nodes_input_values(modifier):
+    inputs = getattr(getattr(modifier, "properties", None), "inputs", None)
+    interface = getattr(getattr(modifier, "node_group", None), "interface", None)
+    if inputs is not None and interface is not None:
+        for item in interface.items_tree:
+            if (
+                getattr(item, "item_type", None) != "SOCKET"
+                or getattr(item, "in_out", None) != "INPUT"
+            ):
+                continue
+            try:
+                input_group = inputs[item.identifier]
+                if "value" in input_group:
+                    yield input_group["value"]
+            except (KeyError, TypeError):
+                continue
+        return
+
+    try:
+        for key in modifier.keys():
+            yield modifier.get(key)
+    except (AttributeError, TypeError):
+        return
+
+
 def _ta_gpro_instance_collections(obj):
     collections = []
     seen = set()
@@ -68,13 +93,7 @@ def _ta_gpro_instance_collections(obj):
         if not is_gpro:
             continue
 
-        try:
-            modifier_keys = list(modifier.keys())
-        except TypeError:
-            modifier_keys = []
-
-        for key in modifier_keys:
-            value = modifier.get(key)
+        for value in _ta_geometry_nodes_input_values(modifier):
             if isinstance(value, bpy.types.Collection) and value.name not in seen:
                 collections.append(value)
                 seen.add(value.name)

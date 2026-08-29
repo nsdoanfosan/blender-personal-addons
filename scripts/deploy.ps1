@@ -1,5 +1,5 @@
 param(
-    [string]$BlenderVersion = "5.1"
+    [string]$BlenderVersion = "5.2"
 )
 
 $ErrorActionPreference = "Stop"

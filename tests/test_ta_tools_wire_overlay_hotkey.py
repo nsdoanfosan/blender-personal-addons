@@ -9,7 +9,13 @@ OPERATOR_IDNAME = "view3d.ta_toggle_wire_overlay"
 addon_utils.enable(MODULE, default_set=False)
 
 assert hasattr(bpy.types, "VIEW3D_OT_ta_toggle_wire_overlay")
-assert "show_wireframes" in bpy.types.View3DOverlay.bl_rna.properties
+for property_name in (
+    "show_wireframes",
+    "show_edge_sharp",
+    "show_edge_seams",
+    "show_edge_bevel_weight",
+):
+    assert property_name in bpy.types.View3DOverlay.bl_rna.properties
 
 key_config = bpy.context.window_manager.keyconfigs.addon
 keymap = key_config.keymaps.get("3D View")
@@ -20,14 +26,25 @@ bindings = [
     for item in keymap.keymap_items
     if item.idname == OPERATOR_IDNAME
 ]
-assert len(bindings) == 1
+assert len(bindings) == 4
 
-binding = bindings[0]
-assert binding.type == "F4"
-assert binding.value == "PRESS"
-assert not binding.ctrl
-assert not binding.shift
-assert not binding.alt
+expected_bindings = {
+    "WIREFRAME": "F4",
+    "SHARP": "F5",
+    "SEAM": "F6",
+    "BEVEL_WEIGHT": "F7",
+}
+actual_bindings = {
+    item.properties.overlay_type: item.type
+    for item in bindings
+}
+assert actual_bindings == expected_bindings
+
+for binding in bindings:
+    assert binding.value == "PRESS"
+    assert not binding.ctrl
+    assert not binding.shift
+    assert not binding.alt
 
 addon_utils.disable(MODULE, default_set=False)
 

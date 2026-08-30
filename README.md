@@ -14,7 +14,8 @@ junctions.
   truly closed fitted topology with a wrapped UV seam and cyclic-safe segment
   rebuilding. Press `Ctrl+Shift+J` in the 3D View to open the panel-style TA
   Quick Menu. Press `F4` over a 3D View to show or hide the wire overlay while
-  keeping the current viewport shading mode.
+  keeping the current viewport shading mode. Use `F5` for Sharp, `F6` for Seam,
+  and `F7` for Bevel Weight overlays.
 - `addons/ta_uv_tools`: UV fit, 90 degree rotation, and material border seam tools.
 - `addons/align_object`: clicked-object alignment tool.
 - `addons/toggle_selected_edge_marks`: seam, bevel weight, and sharp toggles.
@@ -202,7 +203,7 @@ addons/ta_tools/
 |-- rename_objects.py                  # selection-based rename dialog
 |-- scene_collection_object_renamer.py # collection-driven scene rename
 |-- ta_tool.py                         # destructive group/color reset + edge cut
-`-- viewport_wire_overlay.py           # F4 wire overlay toggle
+`-- viewport_wire_overlay.py           # F4-F7 viewport overlay toggles
 ```
 
 When adding a module, import it in `__init__.py` and add it to `modules`.

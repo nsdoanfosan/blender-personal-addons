@@ -1,9 +1,9 @@
 bl_info = {
     "name": "TA Tools",
     "author": "PARK",
-    "version": (1, 5, 0),
+    "version": (1, 6, 0),
     "blender": (4, 0, 0),
-    "location": "View3D > Sidebar; Ctrl+Shift+J; F4 wire overlay",
+    "location": "View3D > Sidebar; Ctrl+Shift+J; F4-F7 viewport overlays",
     "description": "Personal collection, naming, linked object, mesh, viewport, and quick-menu utilities",
     "category": "Object",
 }

@@ -1,15 +1,41 @@
 import bpy
+from bpy.props import EnumProperty
 
 
 OPERATOR_IDNAME = "view3d.ta_toggle_wire_overlay"
 KEYMAP_NAME = "3D View"
 addon_keymaps = []
 
+OVERLAY_SETTINGS = {
+    "WIREFRAME": ("show_wireframes", "Wire"),
+    "SHARP": ("show_edge_sharp", "Sharp edges"),
+    "SEAM": ("show_edge_seams", "Seams"),
+    "BEVEL_WEIGHT": ("show_edge_bevel_weight", "Bevel weights"),
+}
+
+HOTKEYS = (
+    ("WIREFRAME", "F4"),
+    ("SHARP", "F5"),
+    ("SEAM", "F6"),
+    ("BEVEL_WEIGHT", "F7"),
+)
+
 
 class VIEW3D_OT_ta_toggle_wire_overlay(bpy.types.Operator):
     bl_idname = OPERATOR_IDNAME
-    bl_label = "Toggle Viewport Wire Overlay"
-    bl_description = "Show or hide wire edges without changing the current viewport shading mode"
+    bl_label = "Toggle Viewport Overlay"
+    bl_description = "Show or hide a viewport overlay without changing the current shading mode"
+
+    overlay_type: EnumProperty(
+        name="Overlay",
+        items=(
+            ("WIREFRAME", "Wire", "Show or hide wire edges"),
+            ("SHARP", "Sharp", "Show or hide sharp edge marks"),
+            ("SEAM", "Seam", "Show or hide seam edge marks"),
+            ("BEVEL_WEIGHT", "Bevel Weight", "Show or hide bevel weight edge marks"),
+        ),
+        default="WIREFRAME",
+    )
 
     @classmethod
     def poll(cls, context):
@@ -22,11 +48,13 @@ class VIEW3D_OT_ta_toggle_wire_overlay(bpy.types.Operator):
 
     def execute(self, context):
         overlay = context.space_data.overlay
-        overlay.show_wireframes = not overlay.show_wireframes
+        property_name, label = OVERLAY_SETTINGS[self.overlay_type]
+        new_state = not getattr(overlay, property_name)
+        setattr(overlay, property_name, new_state)
         context.area.tag_redraw()
 
-        state = "shown" if overlay.show_wireframes else "hidden"
-        self.report({"INFO"}, f"Viewport wire overlay {state}")
+        state = "shown" if new_state else "hidden"
+        self.report({"INFO"}, f"Viewport {label} overlay {state}")
         return {"FINISHED"}
 
 
@@ -46,12 +74,14 @@ def _register_keymap():
         if keymap_item.idname == OPERATOR_IDNAME:
             keymap.keymap_items.remove(keymap_item)
 
-    keymap_item = keymap.keymap_items.new(
-        OPERATOR_IDNAME,
-        type="F4",
-        value="PRESS",
-    )
-    addon_keymaps.append((keymap, keymap_item))
+    for overlay_type, key_type in HOTKEYS:
+        keymap_item = keymap.keymap_items.new(
+            OPERATOR_IDNAME,
+            type=key_type,
+            value="PRESS",
+        )
+        keymap_item.properties.overlay_type = overlay_type
+        addon_keymaps.append((keymap, keymap_item))
 
 
 def _unregister_keymap():

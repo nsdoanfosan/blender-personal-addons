@@ -28,6 +28,11 @@ assert not hasattr(addon, "_depsgraph_update_post")
 wire = make_object("WBSV_Wire", "WIRE")
 bounds = make_object("WBSV_Bounds", "BOUNDS")
 solid = make_object("WBSV_Solid", "TEXTURED")
+preview = make_object("WBSV_ExternalPreview", "WIRE")
+preview_group = bpy.data.node_groups.new("WBSV_ExternalPreviewGroup", "GeometryNodeTree")
+preview_group["send2ue_preview_only"] = True
+preview_modifier = preview.modifiers.new("Unreal Height Preview", "NODES")
+preview_modifier.node_group = preview_group
 
 bpy.ops.object.select_all(action="DESELECT")
 view_layer.objects.active = None
@@ -38,6 +43,8 @@ addon._initialize_view_layer(scene, view_layer)
 assert wire.hide_get(view_layer=view_layer)
 assert bounds.hide_get(view_layer=view_layer)
 assert not solid.hide_get(view_layer=view_layer)
+assert not preview.wbsv_managed
+assert not preview.hide_get(view_layer=view_layer)
 
 view_layer.objects.active = wire
 addon._on_active_object_changed()
@@ -101,4 +108,5 @@ assert not late.hide_get(view_layer=view_layer)
 assert not disabled.hide_get(view_layer=view_layer)
 assert disabled.hide_viewport
 assert not solid.hide_get(view_layer=view_layer)
+assert not preview.hide_get(view_layer=view_layer)
 print("WBSV_SMOKE_OK")

@@ -1,7 +1,7 @@
 bl_info = {
     "name": "WIRE/BOUNDS Selection Visibility",
     "author": "PARK, Codex",
-    "version": (1, 1, 0),
+    "version": (1, 1, 1),
     "blender": (5, 1, 0),
     "location": "Background (no UI)",
     "description": "Hide WIRE/BOUNDS helpers until they are activated in the Outliner",
@@ -58,8 +58,28 @@ def _set_object_property(obj, name, value):
     return True
 
 
+def _has_external_geometry_preview(obj):
+    """Return whether *obj* is a renderable mesh owned by a preview add-on.
+
+    Unreal Material Bridge marks its viewport-only Geometry Nodes modifiers with
+    ``send2ue_preview_only``.  Those objects can deliberately use WIRE display
+    while the modifier supplies the visible result, so treating them as helper
+    objects makes the complete preview disappear as soon as selection changes.
+    """
+    return any(
+        modifier.type == "NODES"
+        and getattr(modifier, "node_group", None) is not None
+        and modifier.node_group.get("send2ue_preview_only", False)
+        for modifier in obj.modifiers
+    )
+
+
+def _is_excluded(obj):
+    return obj.wbsv_excluded or _has_external_geometry_preview(obj)
+
+
 def _capture_object(obj, view_layer):
-    if obj.wbsv_managed or obj.wbsv_excluded:
+    if obj.wbsv_managed or _is_excluded(obj):
         return False
     if obj.display_type not in TARGET_DISPLAY_TYPES:
         return False
@@ -161,7 +181,7 @@ def _initialize_view_layer(_scene, view_layer):
 
     for obj in view_layer.objects:
         _capture_object(obj, view_layer)
-        if not obj.wbsv_managed or obj.wbsv_excluded:
+        if not obj.wbsv_managed or _is_excluded(obj):
             continue
         if obj is active:
             _show_object(obj, view_layer, select=True)
@@ -212,7 +232,7 @@ def _sync_active_transition(_scene, view_layer):
     # keeps a selection change O(number of shown helpers), not O(scene objects).
     for name in tuple(shown):
         obj = _layer_object(view_layer, name)
-        if obj is None or not obj.wbsv_managed or obj.wbsv_excluded:
+        if obj is None or not obj.wbsv_managed or _is_excluded(obj):
             shown.discard(name)
             continue
         if obj is active or obj.select_get(view_layer=view_layer):
@@ -222,7 +242,7 @@ def _sync_active_transition(_scene, view_layer):
 
     if active is not None:
         _capture_object(active, view_layer)
-        if active.wbsv_managed and not active.wbsv_excluded:
+        if active.wbsv_managed and not _is_excluded(active):
             changed |= _show_object(active, view_layer, select=True)
             shown.add(active.name)
 
@@ -251,7 +271,7 @@ def _capture_new_targets(_scene, view_layer):
     # display_type changes are rare. A single scan here replaces a handler that
     # would otherwise run on every dependency-graph evaluation and animation frame.
     for obj in view_layer.objects:
-        if obj.wbsv_managed or obj.wbsv_excluded:
+        if obj.wbsv_managed or _is_excluded(obj):
             continue
         if not _capture_object(obj, view_layer):
             continue

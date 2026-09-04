@@ -1,7 +1,7 @@
 bl_info = {
     "name": "WIRE/BOUNDS Selection Visibility",
     "author": "PARK, Codex",
-    "version": (1, 1, 1),
+    "version": (1, 1, 2),
     "blender": (5, 1, 0),
     "location": "Background (no UI)",
     "description": "Hide WIRE/BOUNDS helpers until they are activated in the Outliner",
@@ -151,6 +151,44 @@ def _restore_object(obj, view_layer):
     return changed
 
 
+def _release_object_after_display_change(obj):
+    """Stop managing an object whose display mode was changed by the user.
+
+    Display changes made by this add-on happen while ``_is_syncing`` is true, so
+    reaching this function means an external edit changed a managed helper away
+    from WIRE/BOUNDS.  Preserve that chosen display mode and restore only the
+    visibility/selectability state captured when management began.
+    """
+    if not obj.wbsv_managed or obj.display_type in TARGET_DISPLAY_TYPES:
+        return False
+
+    chosen_display = obj.display_type
+    changed = False
+    changed |= _set_object_property(
+        obj, "hide_select", obj.wbsv_original_hide_select
+    )
+    changed |= _set_object_property(
+        obj, "hide_viewport", obj.wbsv_original_hide_viewport
+    )
+
+    for scene in bpy.data.scenes:
+        for view_layer in scene.view_layers:
+            if _layer_object(view_layer, obj.name) is not obj:
+                continue
+            if obj.hide_get(view_layer=view_layer) != obj.wbsv_original_hidden:
+                obj.hide_set(obj.wbsv_original_hidden, view_layer=view_layer)
+                changed = True
+
+    # Keep the user's explicit SOLID/TEXTURED change.  This assignment is mostly
+    # documentary, but also protects it from future changes to the restoration
+    # code above.
+    changed |= _set_object_property(obj, "display_type", chosen_display)
+    obj.wbsv_managed = False
+    for shown in _shown_names_by_view_layer.values():
+        shown.discard(obj.name)
+    return changed
+
+
 def _restore_all_objects():
     managed_objects = [obj for obj in bpy.data.objects if obj.wbsv_managed]
     if not managed_objects:
@@ -289,6 +327,11 @@ def _on_display_type_changed():
 
     _is_syncing = True
     try:
+        # A managed helper that the user changes to SOLID/TEXTURED is no longer a
+        # helper.  Release it before looking for newly-created WIRE/BOUNDS targets;
+        # otherwise the next selection change restores the stale WIRE value.
+        for obj in bpy.data.objects:
+            _release_object_after_display_change(obj)
         for scene, view_layer in _iter_window_scene_view_layers():
             _capture_new_targets(scene, view_layer)
     finally:

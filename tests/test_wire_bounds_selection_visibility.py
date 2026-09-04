@@ -81,6 +81,26 @@ addon._on_display_type_changed()
 assert late.wbsv_managed
 assert late.hide_get(view_layer=view_layer)
 
+manual = make_object("WBSV_ManualDisplay", "WIRE")
+addon._on_display_type_changed()
+assert manual.wbsv_managed
+view_layer.objects.active = manual
+addon._on_active_object_changed()
+assert not manual.hide_get(view_layer=view_layer)
+
+manual.display_type = "TEXTURED"
+addon._on_display_type_changed()
+assert not manual.wbsv_managed
+assert manual.display_type == "TEXTURED"
+assert not manual.hide_get(view_layer=view_layer)
+
+manual.select_set(False, view_layer=view_layer)
+solid.select_set(True, view_layer=view_layer)
+view_layer.objects.active = solid
+addon._on_active_object_changed()
+assert manual.display_type == "TEXTURED"
+assert not manual.hide_get(view_layer=view_layer)
+
 disabled = make_object("WBSV_Disabled", "WIRE")
 disabled.hide_viewport = True
 addon._capture_object(disabled, view_layer)
@@ -109,4 +129,6 @@ assert not disabled.hide_get(view_layer=view_layer)
 assert disabled.hide_viewport
 assert not solid.hide_get(view_layer=view_layer)
 assert not preview.hide_get(view_layer=view_layer)
+assert manual.display_type == "TEXTURED"
+assert not manual.hide_get(view_layer=view_layer)
 print("WBSV_SMOKE_OK")

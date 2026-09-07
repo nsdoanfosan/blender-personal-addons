@@ -1,7 +1,7 @@
 bl_info = {
     "name": "WIRE/BOUNDS Selection Visibility",
     "author": "PARK, Codex",
-    "version": (1, 1, 2),
+    "version": (1, 1, 3),
     "blender": (5, 1, 0),
     "location": "Background (no UI)",
     "description": "Hide WIRE/BOUNDS helpers until they are activated in the Outliner",
@@ -9,6 +9,7 @@ bl_info = {
 }
 
 import bpy
+import sys
 from bpy.app.handlers import persistent
 from bpy.props import BoolProperty, StringProperty
 
@@ -74,8 +75,15 @@ def _has_external_geometry_preview(obj):
     )
 
 
+def _has_temporary_visibility_owner(obj):
+    debug = sys.modules.get('debug_render_pass_cycle')
+    controls = getattr(getattr(debug, 'weight_visibility', None), 'controls', None)
+    return bool(controls and controls(obj))
+
+
 def _is_excluded(obj):
-    return obj.wbsv_excluded or _has_external_geometry_preview(obj)
+    return (obj.wbsv_excluded or _has_temporary_visibility_owner(obj)
+            or _has_external_geometry_preview(obj))
 
 
 def _capture_object(obj, view_layer):
@@ -159,7 +167,8 @@ def _release_object_after_display_change(obj):
     from WIRE/BOUNDS.  Preserve that chosen display mode and restore only the
     visibility/selectability state captured when management began.
     """
-    if not obj.wbsv_managed or obj.display_type in TARGET_DISPLAY_TYPES:
+    if (_has_temporary_visibility_owner(obj) or not obj.wbsv_managed
+            or obj.display_type in TARGET_DISPLAY_TYPES):
         return False
 
     chosen_display = obj.display_type
@@ -187,6 +196,36 @@ def _release_object_after_display_change(obj):
     for shown in _shown_names_by_view_layer.values():
         shown.discard(obj.name)
     return changed
+
+
+def resume_objects(view_layer, objects):
+    """Resume helpers released by a temporary view, using the current selection."""
+    global _is_syncing
+    if _is_syncing or _is_unregistering:
+        return
+    _is_syncing = True
+    try:
+        key = _view_layer_key(view_layer)
+        active = view_layer.objects.active
+        shown = _shown_names_by_view_layer.setdefault(key, set())
+        for obj in objects:
+            if _layer_object(view_layer, obj.name) is not obj or _is_excluded(obj):
+                continue
+            _release_object_after_display_change(obj)
+            _capture_object(obj, view_layer)
+            if not obj.wbsv_managed:
+                continue
+            if obj is active or obj.select_get(view_layer=view_layer):
+                _show_object(obj, view_layer, select=obj is active)
+                shown.add(obj.name)
+            else:
+                _hide_object(obj, view_layer)
+                shown.discard(obj.name)
+        # A selection notification may still be queued when the debug view exits.
+        # Process it too, so previously shown unrelated helpers are not stranded.
+        _sync_active_transition(None, view_layer)
+    finally:
+        _is_syncing = False
 
 
 def _restore_all_objects():

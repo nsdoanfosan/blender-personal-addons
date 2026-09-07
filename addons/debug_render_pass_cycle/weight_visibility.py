@@ -1,29 +1,43 @@
 """Temporary guide-only visibility for the live Weight view."""
 import bpy
+import sys
 
 _states = []
 
 
 def restore():
     """Restore the exact per-view-layer states, including initially hidden guides."""
+    released = {}
     while _states:
         state = _states.pop()
         try:
             obj = state['object']
+            if state.get('surface_override') and obj.display_type == 'TEXTURED':
+                obj.display_type = state['display_type']
             obj.hide_set(state['hidden'], view_layer=state['view_layer'])
             if state['local'] is not None:
                 obj.local_view_set(state['space'], state['local'])
+            released.setdefault(state['view_layer'], []).append(obj)
         except (ReferenceError, RuntimeError):
             # The object/view layer may have been removed while debugging.
             continue
+    # Selection can change while Weight owns visibility. Resume only these
+    # helpers against the current selection, not the stale entry selection.
+    wire = sys.modules.get('wire_bounds_selection_visibility')
+    resume = getattr(wire, 'resume_objects', None)
+    if resume is not None and hasattr(bpy.types.Object, 'wbsv_managed'):
+        for view_layer, objects in released.items():
+            resume(view_layer, objects)
 
 
-def _remember(obj, context):
+def _remember(obj, context, surface_override=False):
     if any(row['object'] == obj and row['view_layer'] == context.view_layer for row in _states):
         return
     space = context.space_data
     _states.append({'object': obj, 'view_layer': context.view_layer,
                     'hidden': obj.hide_get(view_layer=context.view_layer),
+                    'display_type': obj.display_type,
+                    'surface_override': surface_override,
                     'space': space,
                     'local': obj.local_view_get(space) if space.local_view else None})
 
@@ -61,7 +75,8 @@ def show_guides(context):
     # retained as guides rather than hidden because of a shorter parallel chain.
     guides = {guide for _, guide in pairs}
     for guide in guides:
-        _remember(guide, context)
+        _remember(guide, context, surface_override=True)
+        guide.display_type = 'TEXTURED'
         guide.hide_set(False, view_layer=context.view_layer)
         if context.space_data.local_view:
             guide.local_view_set(context.space_data, True)
@@ -79,3 +94,8 @@ def show_guides(context):
 
 def active():
     return bool(_states)
+
+
+def controls(obj):
+    """Runtime ownership only; never overwrite the user's exclusion property."""
+    return any(state['object'] == obj for state in _states)

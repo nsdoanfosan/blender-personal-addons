@@ -43,19 +43,22 @@ guide = generated('IntermediateWithNoNamingConvention', root)
 render = generated('FinalCards', guide)
 render.parent = root  # Deliberately different from the generator source.
 direct = mesh_object('DirectTwoStageGuide')
+direct.show_wire = True  # Preserve mixed original wire settings on exit.
 direct.hide_set(True)
 two_stage = generated('TwoStageFinal', direct)
 hidden = generated('InitiallyHiddenFinal', guide); hidden.hide_set(True)
 orphan = generated('NoGuideFinal', None)
 unrelated = mesh_object('OrdinarySceneMesh')
 bpy.context.view_layer.update()
-before = {o.name: (o.hide_get(), o.hide_render) for o in bpy.context.scene.objects}
+before = {o.name: (o.hide_get(), o.hide_render, o.show_wire, o.show_all_edges)
+          for o in bpy.context.scene.objects}
 sources_before = {o.name for o in hair._final_export_sources(export)}
 
 for exit_kind in ('combined', 'other_pass', 'save', 'export', 'disable'):
     assert debug.apply_debug_view(context, 'ATTRIBUTE_WEIGHT_G') == 'ATTRIBUTE_WEIGHT_G'
     assert render.hide_get() and two_stage.hide_get()
     assert guide.visible_get() and direct.visible_get()
+    assert all(o.show_wire and o.show_all_edges for o in (guide, direct))
     assert hidden.hide_get() and orphan.visible_get() and unrelated.visible_get()
     assert all(o.hide_render == before[o.name][1] for o in bpy.context.scene.objects)
     # Re-entering the same pass must not replace the original visibility snapshot.
@@ -65,7 +68,8 @@ for exit_kind in ('combined', 'other_pass', 'save', 'export', 'disable'):
     elif exit_kind == 'save': debug._save_pre_remove_debug_materials(None)
     elif exit_kind == 'export': hair.restore_debug_view()
     else: addon_utils.disable('debug_render_pass_cycle', default_set=False)
-    assert {o.name: (o.hide_get(), o.hide_render) for o in bpy.context.scene.objects} == before, exit_kind
+    assert {o.name: (o.hide_get(), o.hide_render, o.show_wire, o.show_all_edges)
+            for o in bpy.context.scene.objects} == before, exit_kind
     assert {o.name for o in hair._final_export_sources(export)} == sources_before, exit_kind
     assert not debug.weight_visibility.active()
 print('DEBUG_WEIGHT_VISIBILITY_OK: two/three stages, actual input, no guide/weight, hidden preservation, repeated entry, five restore paths, export candidates')

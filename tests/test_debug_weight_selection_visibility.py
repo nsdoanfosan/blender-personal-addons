@@ -59,6 +59,7 @@ select(guide)
 select(other)
 assert not guide.hide_get(), 'selection addon hid the Weight guide after selection changed'
 assert guide.display_type=='TEXTURED', 'Weight guide must remain a visible surface'
+assert guide.show_wire and guide.show_all_edges, 'Unselected Weight guides need wire'
 
 # The display-type notification must not release managed debug guides.
 wire._on_display_type_changed()
@@ -96,6 +97,7 @@ for leave in ('other_pass','save','export','disable'):
     else: addon_utils.disable('debug_render_pass_cycle',default_set=False)
     assert not debug.weight_visibility.active()
     assert guide.hide_get() and guide.display_type=='BOUNDS', leave
+    assert not guide.show_wire and not guide.show_all_edges, leave
     select(guide); assert not guide.hide_get() and guide.display_type=='WIRE', leave
     select(other); assert guide.hide_get(), leave
 

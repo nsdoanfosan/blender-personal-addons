@@ -57,6 +57,8 @@ bpy.ops.wm.save_as_mainfile(filepath=str(out/'after_undo.blend'),check_existing=
 print('SAVED_AFTER_UNDO',flush=True)
 assert not bpy.data.objects['LifecycleRender'].hide_get()
 assert bpy.data.objects['LifecycleGuide'].hide_get()
+assert not bpy.data.objects['LifecycleGuide'].show_wire
+assert not bpy.data.objects['LifecycleGuide'].show_all_edges
 
 # Deletion and name reuse must not make an old restore record own a new object.
 debug.apply_debug_view(context(),'ATTRIBUTE_WEIGHT_G')
@@ -81,6 +83,7 @@ assert bpy.context.view_layer.material_override is None
 assert not bpy.data.objects['LifecycleRender'].hide_get()
 assert bpy.data.objects['Renamed Guide'].hide_get()
 assert bpy.data.objects['Renamed Guide'].display_type=='BOUNDS'
+assert not bpy.data.objects['Renamed Guide'].show_wire
 
 # Loading another Main must discard old runtime references before it is freed.
 debug.apply_debug_view(context(),'ATTRIBUTE_WEIGHT_G')
@@ -88,6 +91,7 @@ bpy.ops.wm.open_mainfile(filepath=str(out/'weight_saved.blend'),load_ui=True)
 assert bpy.context.view_layer.material_override is None
 assert not bpy.data.objects['LifecycleRender'].hide_get()
 assert bpy.data.objects['Renamed Guide'].hide_get()
+assert not bpy.data.objects['Renamed Guide'].show_wire
 assert not debug.weight_visibility.active()
 addon_utils.disable('debug_render_pass_cycle',default_set=False)
 assert debug._history_post_invalidate_runtime not in bpy.app.handlers.undo_post

@@ -263,6 +263,17 @@ assert len(curve_data.points) == 0
 assert len(draw_data["positions"]) == 4
 assert len(draw_data["triangles"]) == 2
 assert {color[0] for color in draw_data["colors"]} == {0.0, 1.0}
+wire_data = addon._weight_mesh_draw_data(curve_object, bpy.context.evaluated_depsgraph_get(), include_wire=True)
+assert len(wire_data["edges"]) == 4, 'A quad must not show triangulation diagonals'
+# Ordinary mesh guides share the same evaluated-edge extraction path.
+mesh_data = bpy.data.meshes.new('WeightWireMesh')
+mesh_data.from_pydata([(0,0,0),(1,0,0),(1,1,0),(0,1,0)], [], [(0,1,2,3)])
+mesh_object = bpy.data.objects.new('WeightWireMesh', mesh_data)
+bpy.context.scene.collection.objects.link(mesh_object)
+bpy.context.view_layer.update()
+mesh_wire = addon._weight_mesh_draw_data(mesh_object, bpy.context.evaluated_depsgraph_get(), include_wire=True)
+assert len(mesh_wire['edges']) == 4
+assert {c[0] for c in mesh_wire['colors']} == {0.0}
 remap.inputs[1].default_value = 0.0
 remap.inputs[2].default_value = 0.25
 addon._weight_overlay_dirty = False
@@ -274,12 +285,16 @@ assert {color[0] for color in changed_data["colors"]} == {0.25}
 store_weight.inputs["Name"].default_value = "UnrelatedColor"
 bpy.context.view_layer.update()
 assert addon._weight_mesh_draw_data(curve_object, bpy.context.evaluated_depsgraph_get()) is None
+missing_guide = addon._weight_mesh_draw_data(curve_object, bpy.context.evaluated_depsgraph_get(), include_wire=True)
+assert len(missing_guide["edges"]) == 4
+assert {c[0] for c in missing_guide["colors"]} == {0.0}
 assert addon._weight_draw_handler is not None
 assert addon._invalidate_weight_overlay in bpy.app.handlers.depsgraph_update_post
 # Saving/loading must discard runtime GPU state just like returning to Combined.
 addon._save_pre_remove_debug_materials(None)
 assert addon._weight_draw_handler is None
 assert not addon._weight_overlay_cache
+assert not addon._weight_wire_cache
 assert bpy.context.view_layer.material_override is None
 assert addon.apply_debug_view(real_shading_context, "ATTRIBUTE_WEIGHT_G") == "ATTRIBUTE_WEIGHT_G"
 addon._load_post_start_input_listeners(None)

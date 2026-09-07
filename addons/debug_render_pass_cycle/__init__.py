@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Debug Render Pass Cycle",
     "author": "PARK / OpenAI",
-    "version": (1, 3, 1),
+    "version": (1, 5, 0),
     "blender": (4, 0, 0),
     "location": "3D Viewport (Material Preview / Rendered) > B / M; Sidebar > View",
     "description": "Cycle Unreal-style debug render passes without changing materials",
@@ -12,6 +12,7 @@ import blf
 import bpy
 from bpy.app.handlers import persistent
 from bpy.props import EnumProperty, StringProperty
+from . import weight_visibility
 
 
 OPERATOR_CYCLE_ID = "view3d.cycle_debug_render_pass"
@@ -34,6 +35,7 @@ CUSTOM_VIEW_SPECS = (
     ("ATTRIBUTE_FACTOR", "Factor"),
     ("ATTRIBUTE_RANDOM", "Random"),
     ("ATTRIBUTE_MESH_AO", "Mesh AO"),
+    ("ATTRIBUTE_WEIGHT_G", "Weight G (Chaos Cloth)"),
 )
 
 VIEW_SPECS = (
@@ -47,6 +49,8 @@ CUSTOM_VIEW_CHANNELS = {
     "ATTRIBUTE_FACTOR": ("Factor", "R"),
     "ATTRIBUTE_RANDOM": ("Random", "G"),
     "ATTRIBUTE_MESH_AO": ("AO", "B"),
+    # Weight is authored separately; only the export mesh packs it into G.
+    "ATTRIBUTE_WEIGHT_G": ("ChaosWeight", None),
 }
 
 DEBUG_MATERIAL_TAG = "debug_render_pass_cycle_runtime"
@@ -63,6 +67,10 @@ _custom_view_by_space = {}
 _material_override_states = {}
 _debug_materials = {}
 _draw_handler = None
+_weight_draw_handler = None
+_weight_overlay_shader = None
+_weight_overlay_cache = {}
+_weight_overlay_dirty = True
 LISTENER_BL_IDNAME = "WM_OT_debug_render_pass_input_listener"
 LISTENER_WATCHDOG_INTERVAL = 2.0
 
@@ -285,15 +293,27 @@ def _build_debug_material(view_id):
     output = node_tree.nodes.new("ShaderNodeOutputMaterial")
     emission = node_tree.nodes.new("ShaderNodeEmission")
     named_attribute = node_tree.nodes.new("ShaderNodeAttribute")
+    named_attribute.attribute_name = attribute_name
+    emission.inputs["Strength"].default_value = 1.0
+    node_tree.links.new(emission.outputs["Emission"], output.inputs["Surface"])
+
+    if view_id == "ATTRIBUTE_WEIGHT_G":
+        # Send2UE reads ChaosWeight.color[0] (scene-linear), then writes that
+        # value to RFAOS.color_srgb.G. Its live source is NOT Random/packed G.
+        # Missing ChaosWeight is zero, matching the exporter's fixed fallback.
+        separate = node_tree.nodes.new("ShaderNodeSeparateColor")
+        separate.mode = "RGB"
+        node_tree.links.new(named_attribute.outputs["Color"], separate.inputs["Color"])
+        node_tree.links.new(separate.outputs["Red"], emission.inputs["Color"])
+        return material
+
     packed_attribute = node_tree.nodes.new("ShaderNodeAttribute")
     separate = node_tree.nodes.new("ShaderNodeSeparateColor")
     maximum = node_tree.nodes.new("ShaderNodeMath")
 
-    named_attribute.attribute_name = attribute_name
     packed_attribute.attribute_name = "ChannelPacked_FRAO"
     separate.mode = "RGB"
     maximum.operation = "MAXIMUM"
-    emission.inputs["Strength"].default_value = 1.0
 
     channel_socket = {
         "R": "Red",
@@ -304,7 +324,6 @@ def _build_debug_material(view_id):
     node_tree.links.new(packed_attribute.outputs["Color"], separate.inputs["Color"])
     node_tree.links.new(separate.outputs[channel_socket], maximum.inputs[1])
     node_tree.links.new(maximum.outputs["Value"], emission.inputs["Color"])
-    node_tree.links.new(emission.outputs["Emission"], output.inputs["Surface"])
     return material
 
 
@@ -316,7 +335,154 @@ def _debug_material(view_id):
     return material
 
 
+def _weight_mesh_draw_data(obj, depsgraph):
+    """Read the mesh component of a Curves Geometry Nodes result, without conversion.
+
+    Blender 5.2 can display a generated mesh while the evaluated Object.data is
+    an empty Curves datablock. Its viewport material path may consequently miss
+    the mesh's color attribute, although the same mesh renders/exports correctly.
+    Keep the GeometrySet alive until all requested values have been copied.
+    """
+    if obj.type != "CURVES":
+        return None
+    evaluated = obj.evaluated_get(depsgraph)
+    if not hasattr(evaluated, "evaluated_geometry"):
+        return None
+    geometry = evaluated.evaluated_geometry()
+    mesh = geometry.mesh
+    if mesh is None:
+        return None
+    attribute = mesh.attributes.get("ChaosWeight")
+    if attribute is None or attribute.domain != "POINT":
+        return None
+    if attribute.data_type not in {"FLOAT_COLOR", "BYTE_COLOR"}:
+        return None
+    mesh.calc_loop_triangles()
+    positions = [tuple(vertex.co) for vertex in mesh.vertices]
+    weights = [max(0.0, min(1.0, value.color[0])) for value in attribute.data]
+    if len(positions) != len(weights):
+        return None
+    return {
+        "positions": positions,
+        "colors": [(weight, weight, weight, 1.0) for weight in weights],
+        "triangles": [tuple(triangle.vertices) for triangle in mesh.loop_triangles],
+    }
+
+
+def _clear_weight_overlay():
+    global _weight_overlay_dirty
+    _weight_overlay_cache.clear()
+    _weight_overlay_dirty = True
+
+
+def _set_weight_overlay_enabled(enabled):
+    global _weight_draw_handler, _weight_overlay_shader
+    if enabled:
+        if _weight_draw_handler is None:
+            _weight_draw_handler = bpy.types.SpaceView3D.draw_handler_add(
+                _draw_weight_overlay, (), "WINDOW", "POST_VIEW",
+            )
+        if _invalidate_weight_overlay not in bpy.app.handlers.depsgraph_update_post:
+            bpy.app.handlers.depsgraph_update_post.append(_invalidate_weight_overlay)
+    else:
+        if _weight_draw_handler is not None:
+            bpy.types.SpaceView3D.draw_handler_remove(_weight_draw_handler, "WINDOW")
+            _weight_draw_handler = None
+        if _invalidate_weight_overlay in bpy.app.handlers.depsgraph_update_post:
+            bpy.app.handlers.depsgraph_update_post.remove(_invalidate_weight_overlay)
+        _clear_weight_overlay()
+        _weight_overlay_shader = None
+
+
+@persistent
+def _invalidate_weight_overlay(_scene, depsgraph):
+    global _weight_overlay_dirty
+    if any(update.is_updated_geometry or isinstance(update.id, bpy.types.NodeTree)
+           for update in depsgraph.updates):
+        _weight_overlay_dirty = True
+
+
+def _weight_shader():
+    global _weight_overlay_shader
+    if _weight_overlay_shader is None:
+        import gpu
+        interface = gpu.types.GPUStageInterfaceInfo("debug_weight_color")
+        interface.smooth("VEC4", "weight_color")
+        info = gpu.types.GPUShaderCreateInfo()
+        info.push_constant("MAT4", "ModelViewProjectionMatrix")
+        info.vertex_in(0, "VEC3", "pos")
+        info.vertex_in(1, "VEC4", "color")
+        info.vertex_out(interface)
+        info.fragment_out(0, "VEC4", "fragColor")
+        # A tiny clip-space bias avoids fighting the identical underlying guide
+        # surface. Depth testing still preserves occlusion by other geometry.
+        info.vertex_source("""
+            void main() {
+                gl_Position = ModelViewProjectionMatrix * vec4(pos, 1.0);
+                gl_Position.z -= 0.000001 * gl_Position.w;
+                weight_color = color;
+            }
+        """)
+        info.fragment_source("void main() { fragColor = weight_color; }")
+        _weight_overlay_shader = gpu.shader.create_from_info(info)
+    return _weight_overlay_shader
+
+
+def _draw_weight_overlay():
+    global _weight_overlay_dirty
+    context = bpy.context
+    if (not viewport_supports_debug_passes(context)
+            or current_debug_view_id(context) != "ATTRIBUTE_WEIGHT_G"
+            or context.region_data is None):
+        return
+    import gpu
+    from gpu_extras.batch import batch_for_shader
+    objects = {obj.as_pointer(): obj for obj in context.visible_objects
+               if obj.type == "CURVES"}
+    shader = _weight_shader()
+    if _weight_overlay_dirty or set(objects) != set(_weight_overlay_cache):
+        depsgraph = context.evaluated_depsgraph_get()
+        _weight_overlay_cache.clear()
+        for key, obj in objects.items():
+            data = _weight_mesh_draw_data(obj, depsgraph)
+            _weight_overlay_cache[key] = (
+                batch_for_shader(shader, "TRIS", {
+                    "pos": data["positions"], "color": data["colors"],
+                }, indices=data["triangles"])
+                if data and data["triangles"] else None
+            )
+        _weight_overlay_dirty = False
+    _draw_weight_batches(shader, objects, context.region_data.perspective_matrix)
+
+
+def _draw_weight_batches(shader, objects, projection_matrix):
+    import gpu
+    depth_test = gpu.state.depth_test_get()
+    depth_mask = gpu.state.depth_mask_get()
+    blend = gpu.state.blend_get()
+    try:
+        gpu.state.depth_test_set("LESS_EQUAL")
+        # Generated guide tubes need to occlude their own back faces, too.
+        # Testing only the existing viewport depth lets later triangles paint
+        # over nearer triangles when the original guide has no usable depth.
+        gpu.state.depth_mask_set(True)
+        gpu.state.blend_set("NONE")
+        shader.bind()
+        for key, obj in objects.items():
+            batch = _weight_overlay_cache.get(key)
+            if batch is not None:
+                shader.uniform_float("ModelViewProjectionMatrix",
+                                     projection_matrix @ obj.matrix_world)
+                batch.draw(shader)
+    finally:
+        gpu.state.depth_test_set(depth_test)
+        gpu.state.depth_mask_set(depth_mask)
+        gpu.state.blend_set(blend)
+
+
 def _restore_material_overrides():
+    weight_visibility.restore()
+    _set_weight_overlay_enabled(False)
     for state in tuple(_material_override_states.values()):
         view_layer = state["view_layer"]
         try:
@@ -329,6 +495,7 @@ def _restore_material_overrides():
 
 
 def _remove_debug_materials():
+    _clear_weight_overlay()
     _restore_material_overrides()
     _set_mesh_ao_viewport_enabled(False)
     _debug_materials.clear()
@@ -379,7 +546,10 @@ def _draw_view_indicator():
     blf.shadow(font_id, 3, 0.0, 0.0, 0.0, 0.85)
     blf.shadow_offset(font_id, 2, -2)
     blf.position(font_id, 22, 22, 0)
-    blf.draw(font_id, f"DEBUG VIEW  |  {render_pass_label(view_id)}")
+    label = f"DEBUG VIEW  |  {render_pass_label(view_id)}"
+    if view_id == "ATTRIBUTE_WEIGHT_G":
+        label += "  |  Black 0 / White 1  |  Missing = 0"
+    blf.draw(font_id, label)
     blf.disable(font_id, blf.SHADOW)
 
 
@@ -415,6 +585,7 @@ def _unregister_draw_handler():
     if _draw_handler is not None:
         bpy.types.SpaceView3D.draw_handler_remove(_draw_handler, "WINDOW")
         _draw_handler = None
+    _set_weight_overlay_enabled(False)
     if getattr(_register_draw_handler, "header_registered", False):
         bpy.types.VIEW3D_HT_header.remove(_draw_header_indicator)
         _register_draw_handler.header_registered = False
@@ -441,6 +612,7 @@ def apply_debug_view(context, view_id):
                 "original": original,
             }
 
+        _clear_weight_overlay()
         material = _debug_material(view_id)
         view_layer.material_override = material
         _custom_view_by_space.clear()
@@ -450,12 +622,18 @@ def apply_debug_view(context, view_id):
         except (TypeError, ValueError):
             return None
         _set_mesh_ao_viewport_enabled(view_id == "ATTRIBUTE_MESH_AO")
+        if view_id == "ATTRIBUTE_WEIGHT_G":
+            weight_visibility.show_guides(context)
+        else:
+            weight_visibility.restore()
+        _set_weight_overlay_enabled(view_id == "ATTRIBUTE_WEIGHT_G")
         context.area.tag_redraw()
         return view_id
 
     if view_id not in available_render_pass_ids(context):
         return None
 
+    _clear_weight_overlay()
     _restore_material_overrides()
     try:
         shading.render_pass = view_id
@@ -696,6 +874,13 @@ class DEBUGRENDERPASS_PT_view3d(bpy.types.Panel):
         reset = row.operator(OPERATOR_SET_ID, text="M  Combined", icon="FILE_REFRESH")
         reset.pass_id = "COMBINED"
 
+        weight = column.operator(OPERATOR_SET_ID, text="Weight G (Chaos Cloth)", icon="GROUP_VCOL")
+        weight.pass_id = "ATTRIBUTE_WEIGHT_G"
+        if is_usable and current_view == "ATTRIBUTE_WEIGHT_G":
+            column.label(text="Black 0 / White 1")
+            column.label(text="Simulation guides; render hair hidden")
+            column.label(text="Missing ChaosWeight = 0", icon="INFO")
+
         layout.separator()
         layout.label(text="B/M override in Material Preview / Rendered")
 
@@ -747,6 +932,17 @@ def _start_input_listeners():
         return None
 
     window_manager = bpy.context.window_manager
+    if weight_visibility.active():
+        weight_view_open = False
+        for window in window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == "VIEW_3D":
+                    with bpy.context.temp_override(window=window, area=area):
+                        if (viewport_supports_debug_passes(bpy.context)
+                                and current_debug_view_id(bpy.context) == "ATTRIBUTE_WEIGHT_G"):
+                            weight_view_open = True
+        if not weight_view_open:
+            weight_visibility.restore()
     live_window_ids = {window.as_pointer() for window in window_manager.windows}
     _listener_window_ids.intersection_update(live_window_ids)
 
@@ -796,6 +992,11 @@ def _load_post_start_input_listeners(_unused):
 def _save_pre_remove_debug_materials(_unused):
     # Runtime override materials must never be written into the user's blend file.
     _remove_debug_materials()
+
+
+def prepare_for_export():
+    """End temporary viewport overrides before Send2UE collects visible sources."""
+    _restore_material_overrides()
 
 
 def register():

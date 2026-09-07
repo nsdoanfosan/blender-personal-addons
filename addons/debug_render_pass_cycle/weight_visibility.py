@@ -1,6 +1,7 @@
 """Temporary guide-only visibility for the live Weight view."""
 import bpy
 import sys
+from . import runtime_refs
 
 _states = []
 
@@ -11,13 +12,17 @@ def restore():
     while _states:
         state = _states.pop()
         try:
-            obj = state['object']
+            obj = runtime_refs.resolve_id(bpy.data.objects, state['object'])
+            view_layer = runtime_refs.resolve_layer(state['view_layer'])
+            if obj is None or view_layer is None or view_layer.objects.get(obj.name) is not obj:
+                continue
             if state.get('surface_override') and obj.display_type == 'TEXTURED':
                 obj.display_type = state['display_type']
-            obj.hide_set(state['hidden'], view_layer=state['view_layer'])
-            if state['local'] is not None:
-                obj.local_view_set(state['space'], state['local'])
-            released.setdefault(state['view_layer'], []).append(obj)
+            obj.hide_set(state['hidden'], view_layer=view_layer)
+            space = runtime_refs.resolve_space(state['space'])
+            if state['local'] is not None and space is not None and space.local_view:
+                obj.local_view_set(space, state['local'])
+            released.setdefault(view_layer, []).append(obj)
         except (ReferenceError, RuntimeError):
             # The object/view layer may have been removed while debugging.
             continue
@@ -31,14 +36,16 @@ def restore():
 
 
 def _remember(obj, context, surface_override=False):
-    if any(row['object'] == obj and row['view_layer'] == context.view_layer for row in _states):
+    object_key = runtime_refs.id_key(obj)
+    layer_key = runtime_refs.layer_key(context.view_layer)
+    if any(row['object'][0] == object_key[0] and row['view_layer'] == layer_key for row in _states):
         return
     space = context.space_data
-    _states.append({'object': obj, 'view_layer': context.view_layer,
+    _states.append({'object': object_key, 'view_layer': layer_key,
                     'hidden': obj.hide_get(view_layer=context.view_layer),
                     'display_type': obj.display_type,
                     'surface_override': surface_override,
-                    'space': space,
+                    'space': space.as_pointer(),
                     'local': obj.local_view_get(space) if space.local_view else None})
 
 
@@ -98,4 +105,4 @@ def active():
 
 def controls(obj):
     """Runtime ownership only; never overwrite the user's exclusion property."""
-    return any(state['object'] == obj for state in _states)
+    return any(state['object'][0] == obj.session_uid for state in _states)

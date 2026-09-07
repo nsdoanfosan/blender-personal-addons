@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Debug Render Pass Cycle",
     "author": "PARK / OpenAI",
-    "version": (1, 5, 1),
+    "version": (1, 5, 2),
     "blender": (4, 0, 0),
     "location": "3D Viewport (Material Preview / Rendered) > B / M; Sidebar > View",
     "description": "Cycle Unreal-style debug render passes without changing materials",
@@ -13,6 +13,7 @@ import bpy
 from bpy.app.handlers import persistent
 from bpy.props import EnumProperty, StringProperty
 from . import weight_visibility
+from . import runtime_refs
 
 
 OPERATOR_CYCLE_ID = "view3d.cycle_debug_render_pass"
@@ -328,10 +329,10 @@ def _build_debug_material(view_id):
 
 
 def _debug_material(view_id):
-    material = _debug_materials.get(view_id)
-    if material is None or material.name not in bpy.data.materials:
+    material = runtime_refs.resolve_id(bpy.data.materials, _debug_materials.get(view_id))
+    if material is None:
         material = _build_debug_material(view_id)
-        _debug_materials[view_id] = material
+        _debug_materials[view_id] = runtime_refs.id_key(material)
     return material
 
 
@@ -484,10 +485,10 @@ def _restore_material_overrides():
     weight_visibility.restore()
     _set_weight_overlay_enabled(False)
     for state in tuple(_material_override_states.values()):
-        view_layer = state["view_layer"]
+        view_layer = runtime_refs.resolve_layer(state["view_layer"])
         try:
-            if _is_debug_material(view_layer.material_override):
-                view_layer.material_override = state["original"]
+            if view_layer is not None and _is_debug_material(view_layer.material_override):
+                view_layer.material_override = runtime_refs.resolve_id(bpy.data.materials, state["original"])
         except ReferenceError:
             pass
     _material_override_states.clear()
@@ -514,7 +515,7 @@ def current_debug_view_id(context):
         space_pointer = space.as_pointer()
         custom_view = _custom_view_by_space.get(space_pointer)
         if custom_view is not None:
-            material = _debug_materials.get(custom_view)
+            material = runtime_refs.resolve_id(bpy.data.materials, _debug_materials.get(custom_view))
             if material is not None and view_layer.material_override == material:
                 return custom_view
             _custom_view_by_space.pop(space_pointer, None)
@@ -608,8 +609,8 @@ def apply_debug_view(context, view_id):
             if _is_debug_material(original):
                 original = None
             _material_override_states[view_layer_pointer] = {
-                "view_layer": view_layer,
-                "original": original,
+                "view_layer": runtime_refs.layer_key(view_layer),
+                "original": runtime_refs.id_key(original),
             }
 
         _clear_weight_overlay()
@@ -982,6 +983,19 @@ def _schedule_input_listeners():
 
 
 @persistent
+def _load_pre_clear_runtime(_unused):
+    # Clear while the outgoing Main is still live. No RNA handles may cross load.
+    _remove_debug_materials()
+
+
+@persistent
+def _history_post_invalidate_runtime(_unused):
+    # Restore records contain values only and resolve against the new Main.
+    # Geometry batches still need rebuilding even if undo changes only visibility.
+    _clear_weight_overlay()
+
+
+@persistent
 def _load_post_start_input_listeners(_unused):
     _listener_window_ids.clear()
     _remove_debug_materials()
@@ -1012,6 +1026,11 @@ def register():
     remove_legacy_user_keymaps()
     if _load_post_start_input_listeners not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_load_post_start_input_listeners)
+    if _load_pre_clear_runtime not in bpy.app.handlers.load_pre:
+        bpy.app.handlers.load_pre.append(_load_pre_clear_runtime)
+    for handlers in (bpy.app.handlers.undo_post, bpy.app.handlers.redo_post):
+        if _history_post_invalidate_runtime not in handlers:
+            handlers.append(_history_post_invalidate_runtime)
     if _save_pre_remove_debug_materials not in bpy.app.handlers.save_pre:
         bpy.app.handlers.save_pre.append(_save_pre_remove_debug_materials)
     _register_draw_handler()
@@ -1032,6 +1051,11 @@ def unregister():
         bpy.app.timers.unregister(_start_input_listeners)
     if _load_post_start_input_listeners in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_load_post_start_input_listeners)
+    if _load_pre_clear_runtime in bpy.app.handlers.load_pre:
+        bpy.app.handlers.load_pre.remove(_load_pre_clear_runtime)
+    for handlers in (bpy.app.handlers.undo_post, bpy.app.handlers.redo_post):
+        if _history_post_invalidate_runtime in handlers:
+            handlers.remove(_history_post_invalidate_runtime)
     if _save_pre_remove_debug_materials in bpy.app.handlers.save_pre:
         bpy.app.handlers.save_pre.remove(_save_pre_remove_debug_materials)
 

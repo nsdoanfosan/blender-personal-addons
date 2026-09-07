@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Debug Render Pass Cycle",
     "author": "PARK / OpenAI",
-    "version": (1, 5, 2),
+    "version": (1, 5, 3),
     "blender": (4, 0, 0),
     "location": "3D Viewport (Material Preview / Rendered) > B / M; Sidebar > View",
     "description": "Cycle Unreal-style debug render passes without changing materials",
@@ -71,6 +71,7 @@ _draw_handler = None
 _weight_draw_handler = None
 _weight_overlay_shader = None
 _weight_overlay_cache = {}
+_weight_wire_cache = {}
 _weight_overlay_dirty = True
 LISTENER_BL_IDNAME = "WM_OT_debug_render_pass_input_listener"
 LISTENER_WATCHDOG_INTERVAL = 2.0
@@ -336,7 +337,7 @@ def _debug_material(view_id):
     return material
 
 
-def _weight_mesh_draw_data(obj, depsgraph):
+def _weight_mesh_draw_data(obj, depsgraph, include_wire=False):
     """Read the mesh component of a Curves Geometry Nodes result, without conversion.
 
     Blender 5.2 can display a generated mesh while the evaluated Object.data is
@@ -344,7 +345,7 @@ def _weight_mesh_draw_data(obj, depsgraph):
     the mesh's color attribute, although the same mesh renders/exports correctly.
     Keep the GeometrySet alive until all requested values have been copied.
     """
-    if obj.type != "CURVES":
+    if obj.type not in {"CURVES", "MESH"}:
         return None
     evaluated = obj.evaluated_get(depsgraph)
     if not hasattr(evaluated, "evaluated_geometry"):
@@ -354,25 +355,29 @@ def _weight_mesh_draw_data(obj, depsgraph):
     if mesh is None:
         return None
     attribute = mesh.attributes.get("ChaosWeight")
-    if attribute is None or attribute.domain != "POINT":
-        return None
-    if attribute.data_type not in {"FLOAT_COLOR", "BYTE_COLOR"}:
+    has_weight = (attribute is not None and attribute.domain == "POINT"
+                  and attribute.data_type in {"FLOAT_COLOR", "BYTE_COLOR"})
+    if not has_weight and not include_wire:
         return None
     mesh.calc_loop_triangles()
     positions = [tuple(vertex.co) for vertex in mesh.vertices]
-    weights = [max(0.0, min(1.0, value.color[0])) for value in attribute.data]
+    weights = ([max(0.0, min(1.0, value.color[0])) for value in attribute.data]
+               if has_weight else [0.0] * len(positions))
     if len(positions) != len(weights):
         return None
     return {
         "positions": positions,
         "colors": [(weight, weight, weight, 1.0) for weight in weights],
         "triangles": [tuple(triangle.vertices) for triangle in mesh.loop_triangles],
+        # Use authored mesh edges, never tessellation diagonals from loop triangles.
+        "edges": [tuple(edge.vertices) for edge in mesh.edges] if include_wire else [],
     }
 
 
 def _clear_weight_overlay():
     global _weight_overlay_dirty
     _weight_overlay_cache.clear()
+    _weight_wire_cache.clear()
     _weight_overlay_dirty = True
 
 
@@ -411,6 +416,7 @@ def _weight_shader():
         interface.smooth("VEC4", "weight_color")
         info = gpu.types.GPUShaderCreateInfo()
         info.push_constant("MAT4", "ModelViewProjectionMatrix")
+        info.push_constant("FLOAT", "depth_bias")
         info.vertex_in(0, "VEC3", "pos")
         info.vertex_in(1, "VEC4", "color")
         info.vertex_out(interface)
@@ -420,7 +426,7 @@ def _weight_shader():
         info.vertex_source("""
             void main() {
                 gl_Position = ModelViewProjectionMatrix * vec4(pos, 1.0);
-                gl_Position.z -= 0.000001 * gl_Position.w;
+                gl_Position.z -= depth_bias * gl_Position.w;
                 weight_color = color;
             }
         """)
@@ -439,28 +445,45 @@ def _draw_weight_overlay():
     import gpu
     from gpu_extras.batch import batch_for_shader
     objects = {obj.as_pointer(): obj for obj in context.visible_objects
-               if obj.type == "CURVES"}
+               if obj.type == "CURVES"
+               or (obj.type == "MESH" and weight_visibility.is_guide(obj))}
     shader = _weight_shader()
     if _weight_overlay_dirty or set(objects) != set(_weight_overlay_cache):
         depsgraph = context.evaluated_depsgraph_get()
         _weight_overlay_cache.clear()
+        _weight_wire_cache.clear()
         for key, obj in objects.items():
-            data = _weight_mesh_draw_data(obj, depsgraph)
+            data = _weight_mesh_draw_data(
+                obj, depsgraph,
+                include_wire=obj.show_wire and weight_visibility.is_guide(obj),
+            )
             _weight_overlay_cache[key] = (
                 batch_for_shader(shader, "TRIS", {
                     "pos": data["positions"], "color": data["colors"],
                 }, indices=data["triangles"])
-                if data and data["triangles"] else None
+                # Ordinary Mesh materials already handle all attribute domains;
+                # only generated Curves require the replacement weight surface.
+                if obj.type == "CURVES" and data and data["triangles"] else None
             )
+            if data and data["edges"]:
+                # Keep thin topology lines readable over both fixed black roots
+                # and white moving tips without changing the authored weights.
+                wire_colors = [(0.65, 0.65, 0.65, 1.0) if c[0] < 0.35
+                               else (0.08, 0.08, 0.08, 1.0) for c in data["colors"]]
+                _weight_wire_cache[key] = batch_for_shader(shader, "LINES", {
+                    "pos": data["positions"], "color": wire_colors,
+                }, indices=data["edges"])
         _weight_overlay_dirty = False
-    _draw_weight_batches(shader, objects, context.region_data.perspective_matrix)
+    _draw_weight_batches(shader, objects, context.region_data.perspective_matrix,
+                         show_wire=context.space_data.overlay.show_overlays)
 
 
-def _draw_weight_batches(shader, objects, projection_matrix):
+def _draw_weight_batches(shader, objects, projection_matrix, show_wire=True):
     import gpu
     depth_test = gpu.state.depth_test_get()
     depth_mask = gpu.state.depth_mask_get()
     blend = gpu.state.blend_get()
+    line_width = gpu.state.line_width_get()
     try:
         gpu.state.depth_test_set("LESS_EQUAL")
         # Generated guide tubes need to occlude their own back faces, too.
@@ -469,16 +492,30 @@ def _draw_weight_batches(shader, objects, projection_matrix):
         gpu.state.depth_mask_set(True)
         gpu.state.blend_set("NONE")
         shader.bind()
+        shader.uniform_float("depth_bias", 0.000001)
         for key, obj in objects.items():
             batch = _weight_overlay_cache.get(key)
             if batch is not None:
                 shader.uniform_float("ModelViewProjectionMatrix",
                                      projection_matrix @ obj.matrix_world)
                 batch.draw(shader)
+        # POST_VIEW surfaces can cover Blender's native wire on generated Curves
+        # meshes. Draw edges last, still depth-tested against all front surfaces.
+        if show_wire:
+            gpu.state.depth_mask_set(False)
+            gpu.state.line_width_set(1.0)
+            shader.uniform_float("depth_bias", 0.000002)
+            for key, obj in objects.items():
+                batch = _weight_wire_cache.get(key)
+                if batch is not None and obj.show_wire:
+                    shader.uniform_float("ModelViewProjectionMatrix",
+                                         projection_matrix @ obj.matrix_world)
+                    batch.draw(shader)
     finally:
         gpu.state.depth_test_set(depth_test)
         gpu.state.depth_mask_set(depth_mask)
         gpu.state.blend_set(blend)
+        gpu.state.line_width_set(line_width)
 
 
 def _restore_material_overrides():

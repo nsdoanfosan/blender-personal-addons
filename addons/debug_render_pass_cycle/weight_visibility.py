@@ -18,6 +18,9 @@ def restore():
                 continue
             if state.get('surface_override') and obj.display_type == 'TEXTURED':
                 obj.display_type = state['display_type']
+            if state.get('surface_override'):
+                obj.show_wire = state['show_wire']
+                obj.show_all_edges = state['show_all_edges']
             obj.hide_set(state['hidden'], view_layer=view_layer)
             space = runtime_refs.resolve_space(state['space'])
             if state['local'] is not None and space is not None and space.local_view:
@@ -44,6 +47,8 @@ def _remember(obj, context, surface_override=False):
     _states.append({'object': object_key, 'view_layer': layer_key,
                     'hidden': obj.hide_get(view_layer=context.view_layer),
                     'display_type': obj.display_type,
+                    'show_wire': obj.show_wire,
+                    'show_all_edges': obj.show_all_edges,
                     'surface_override': surface_override,
                     'space': space.as_pointer(),
                     'local': obj.local_view_get(space) if space.local_view else None})
@@ -84,6 +89,8 @@ def show_guides(context):
     for guide in guides:
         _remember(guide, context, surface_override=True)
         guide.display_type = 'TEXTURED'
+        guide.show_wire = True
+        guide.show_all_edges = True
         guide.hide_set(False, view_layer=context.view_layer)
         if context.space_data.local_view:
             guide.local_view_set(context.space_data, True)
@@ -106,3 +113,8 @@ def active():
 def controls(obj):
     """Runtime ownership only; never overwrite the user's exclusion property."""
     return any(state['object'][0] == obj.session_uid for state in _states)
+
+
+def is_guide(obj):
+    return any(state['surface_override'] and state['object'][0] == obj.session_uid
+               for state in _states)

@@ -173,12 +173,13 @@ real_shading_context = SimpleNamespace(
 )
 real_passes = addon.available_render_pass_ids(real_shading_context)
 real_views = addon.available_debug_view_ids(real_shading_context)
-assert real_views[:6] == (
+assert real_views[:7] == (
     "COMBINED",
     "DIFFUSE_COLOR",
     "ATTRIBUTE_FACTOR",
     "ATTRIBUTE_RANDOM",
     "ATTRIBUTE_MESH_AO",
+    "ATTRIBUTE_WEIGHT_G",
     "NORMAL",
 )
 
@@ -207,6 +208,14 @@ assert bpy.context.view_layer.material_override.get(addon.DEBUG_MATERIAL_TAG)
 assert addon.apply_debug_hotkey(real_shading_context, "B") == "ATTRIBUTE_RANDOM"
 assert addon.apply_debug_hotkey(real_shading_context, "B") == "ATTRIBUTE_MESH_AO"
 assert ao_modifier.show_viewport
+assert addon.apply_debug_hotkey(real_shading_context, "B") == "ATTRIBUTE_WEIGHT_G"
+assert addon.current_debug_view_id(real_shading_context) == "ATTRIBUTE_WEIGHT_G"
+assert not ao_modifier.show_viewport
+assert addon.apply_debug_hotkey(real_shading_context, "M") == "COMBINED"
+assert bpy.context.view_layer.material_override is None
+assert addon._weight_draw_handler is None
+assert addon._invalidate_weight_overlay not in bpy.app.handlers.depsgraph_update_post
+assert addon.apply_debug_view(real_shading_context, "ATTRIBUTE_WEIGHT_G") == "ATTRIBUTE_WEIGHT_G"
 assert addon.apply_debug_hotkey(real_shading_context, "B") == "NORMAL"
 assert not ao_modifier.show_viewport
 ao_object[addon.MESH_AO_ORIGINAL_VIEWPORT_PROP][ao_modifier.name] = False
@@ -218,6 +227,66 @@ assert bpy.context.view_layer.material_override is None
 assert addon.apply_debug_hotkey(real_shading_context, "M") == "COMBINED"
 assert viewport_space.shading.render_pass == "COMBINED"
 viewport_space.shading.render_pass = original_render_pass
+assert addon.apply_debug_view(real_shading_context, "ATTRIBUTE_WEIGHT_G") == "ATTRIBUTE_WEIGHT_G"
+
+# A Curves object may output a Mesh component while evaluated Object.data stays
+# empty. Read the actual generated color field, including subsequent node edits.
+curve_data = bpy.data.hair_curves.new("DebugWeight_SourceCurves")
+curve_object = bpy.data.objects.new("DebugWeight_SourceCurves", curve_data)
+bpy.context.scene.collection.objects.link(curve_object)
+weight_group = bpy.data.node_groups.new("DebugWeight_GeneratedMesh", "GeometryNodeTree")
+weight_group.interface.new_socket(name="Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
+grid = weight_group.nodes.new("GeometryNodeMeshGrid")
+grid.inputs["Vertices X"].default_value = 2
+grid.inputs["Vertices Y"].default_value = 2
+position = weight_group.nodes.new("GeometryNodeInputPosition")
+separate = weight_group.nodes.new("ShaderNodeSeparateXYZ")
+remap = weight_group.nodes.new("ShaderNodeMath")
+remap.operation = "MULTIPLY_ADD"
+remap.inputs[1].default_value = 4.0
+store_weight = weight_group.nodes.new("GeometryNodeStoreNamedAttribute")
+store_weight.data_type = "FLOAT_COLOR"
+store_weight.domain = "POINT"
+store_weight.inputs["Name"].default_value = "ChaosWeight"
+weight_output = weight_group.nodes.new("NodeGroupOutput")
+links = weight_group.links
+links.new(grid.outputs["Mesh"], store_weight.inputs["Geometry"])
+links.new(position.outputs["Position"], separate.inputs[0])
+links.new(separate.outputs["X"], remap.inputs[0])
+links.new(remap.outputs[0], store_weight.inputs["Value"])
+links.new(store_weight.outputs["Geometry"], weight_output.inputs[0])
+weight_modifier = curve_object.modifiers.new("GeneratedMesh", "NODES")
+weight_modifier.node_group = weight_group
+bpy.context.view_layer.update()
+draw_data = addon._weight_mesh_draw_data(curve_object, bpy.context.evaluated_depsgraph_get())
+assert len(curve_data.points) == 0
+assert len(draw_data["positions"]) == 4
+assert len(draw_data["triangles"]) == 2
+assert {color[0] for color in draw_data["colors"]} == {0.0, 1.0}
+remap.inputs[1].default_value = 0.0
+remap.inputs[2].default_value = 0.25
+addon._weight_overlay_dirty = False
+bpy.context.view_layer.update()
+assert addon._weight_overlay_dirty
+changed_data = addon._weight_mesh_draw_data(curve_object, bpy.context.evaluated_depsgraph_get())
+assert changed_data["positions"] == draw_data["positions"]
+assert {color[0] for color in changed_data["colors"]} == {0.25}
+store_weight.inputs["Name"].default_value = "UnrelatedColor"
+bpy.context.view_layer.update()
+assert addon._weight_mesh_draw_data(curve_object, bpy.context.evaluated_depsgraph_get()) is None
+assert addon._weight_draw_handler is not None
+assert addon._invalidate_weight_overlay in bpy.app.handlers.depsgraph_update_post
+# Saving/loading must discard runtime GPU state just like returning to Combined.
+addon._save_pre_remove_debug_materials(None)
+assert addon._weight_draw_handler is None
+assert not addon._weight_overlay_cache
+assert bpy.context.view_layer.material_override is None
+assert addon.apply_debug_view(real_shading_context, "ATTRIBUTE_WEIGHT_G") == "ATTRIBUTE_WEIGHT_G"
+addon._load_post_start_input_listeners(None)
+assert addon._weight_draw_handler is None
+assert addon._weight_overlay_shader is None
+assert addon._invalidate_weight_overlay not in bpy.app.handlers.depsgraph_update_post
+assert addon.apply_debug_view(real_shading_context, "ATTRIBUTE_WEIGHT_G") == "ATTRIBUTE_WEIGHT_G"
 viewport_space.shading.type = original_shading_type
 
 addon_utils.disable(MODULE, default_set=False)
@@ -227,6 +296,8 @@ assert not addon._listener_enabled
 assert addon._load_post_start_input_listeners not in bpy.app.handlers.load_post
 assert addon._save_pre_remove_debug_materials not in bpy.app.handlers.save_pre
 assert addon._draw_handler is None
+assert addon._weight_draw_handler is None
+assert addon._invalidate_weight_overlay not in bpy.app.handlers.depsgraph_update_post
 assert not addon._register_draw_handler.header_registered
 assert not any(material.get(addon.DEBUG_MATERIAL_TAG) for material in bpy.data.materials)
 assert default_key_snapshot() == before_default_keys

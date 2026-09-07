@@ -36,6 +36,41 @@ Run:
 The script creates junctions in Blender's `scripts/addons` directory. Editing
 the repository source therefore updates the deployed add-on immediately.
 
+## Debug Render Pass Cycle
+
+In Material Preview or Eevee Rendered view, press **B** to cycle debug views
+and **M** to return to Combined. The attribute views are **Factor → Random →
+Mesh AO → Weight G (Chaos Cloth)**, followed by the standard render passes.
+**N > View > Debug Render Pass > Weight G (Chaos Cloth)** also opens it directly.
+
+Weight G displays Hair Tool Unreal Bridge's live `ChaosWeight` source:
+**black = 0, white = 1**. Missing `ChaosWeight` displays zero, matching Send2UE's
+export fallback. It reads the source's scene-linear red component, which the
+exporter writes numerically to vertex color G; it does not display Random or
+the green component of an already exported `RFAOS` mesh. The preview follows
+changes to Export Weight's input mask without baking or exporting. **M** restores
+the original material override; source material slots and attributes are untouched.
+
+For Curves objects whose Geometry Nodes output is a mesh, Weight G reads that
+evaluated mesh and draws a cached, depth-tested preview. It does not convert the
+source, change its materials, or create exportable helper geometry. Node edits
+invalidate the preview; leaving Weight G, saving/loading a file, or disabling
+the add-on removes the runtime overlay.
+
+Weight G temporarily hides final Hair Tool render outputs in the Export collection
+and shows the immediate generator sources used for guide cloth. Both two-stage and
+three-stage chains use the actual Source Surface input. Missing weights stay black;
+an unresolved source leaves its render object visible. **M**, another debug pass,
+saving, or disabling the add-on restores each object's original visibility. Local
+View membership is restored too. Send2UE ends the temporary debug override before
+collecting export objects, so hidden render outputs are not omitted from export.
+
+Registration and hotkey smoke test (does not save user preferences):
+
+```powershell
+& 'C:\Program Files\Blender Foundation\Blender 5.2\blender.exe' --factory-startup --background --python-exit-code 1 --python .\tests\test_debug_render_pass_cycle.py
+```
+
 ## TA Tools
 
 `addons/ta_tools` is a collection of independent Blender utilities registered

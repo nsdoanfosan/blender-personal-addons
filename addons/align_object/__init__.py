@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Move Each Selected Object To Clicked Object - Alt A",
     "author": "ChatGPT",
-    "version": (1, 9, 0),
+    "version": (1, 10, 0),
     "blender": (4, 0, 0),
     "category": "Object",
 }
@@ -23,6 +23,36 @@ def matrix_to_list(matrix):
 
 def list_to_matrix(data):
     return Matrix(data)
+
+
+def parent_depth(obj):
+    depth = 0
+    while obj.parent is not None:
+        depth += 1
+        obj = obj.parent
+    return depth
+
+
+def set_origin_matrix(obj, matrix):
+    """Change the origin frame, compensating geometry and child parent space."""
+    old_matrix = obj.matrix_world.copy()
+    if old_matrix == matrix:
+        return
+    if obj.data is not None and obj.data.users > 1:
+        # An origin is per object; shared geometry cannot carry its compensation.
+        obj.data = obj.data.copy()
+    obj.matrix_world = matrix
+    bpy.context.view_layer.update()
+    correction = obj.matrix_world.inverted() @ old_matrix
+    if obj.data is not None:
+        if obj.type in {'MESH', 'CURVE', 'SURFACE'}:
+            obj.data.transform(correction, shape_keys=True)
+        else:
+            obj.data.transform(correction)
+        obj.data.update_tag()
+    for child in obj.children:
+        child.matrix_parent_inverse = correction @ child.matrix_parent_inverse
+    bpy.context.view_layer.update()
 
 
 class PickLine:
@@ -186,6 +216,37 @@ class OBJECT_OT_move_each_selected_to_clicked_object(bpy.types.Operator):
         options={'HIDDEN'},
     )
 
+    affect_origins: bpy.props.BoolProperty(
+        name="Affect Only Origins",
+        description="Align origins while keeping geometry and children in place",
+        default=False,
+        options={'HIDDEN'},
+    )
+
+    def _capture_origin_mode(self, context):
+        # Keep the invocation's mode across Adjust Last Operation / F9 replays.
+        if not self.properties.is_property_set("affect_origins"):
+            self.affect_origins = context.scene.tool_settings.use_transform_data_origin
+
+    def _validate_origins(self, context, sources):
+        if not self.affect_origins:
+            return True
+        if context.mode != 'OBJECT':
+            self.report({'ERROR'}, "피봇 정렬은 Object Mode에서 실행하세요.")
+            return False
+        for obj in sources:
+            if (not obj.is_editable or obj.type not in
+                    {'MESH', 'CURVE', 'SURFACE', 'LATTICE', 'ARMATURE', 'EMPTY'}):
+                self.report({'ERROR'}, f"피봇 정렬을 지원하지 않는 오브젝트: {obj.name}")
+                return False
+            if obj.data is not None and not obj.data.is_editable:
+                self.report({'ERROR'}, f"로컬 데이터가 필요한 오브젝트: {obj.name}")
+                return False
+            if abs(obj.matrix_world.determinant()) < 1.0e-12:
+                self.report({'ERROR'}, f"스케일이 0인 오브젝트는 피봇 정렬할 수 없습니다: {obj.name}")
+                return False
+        return True
+
     def invoke(self, context, event):
         if context.area.type != 'VIEW_3D':
             self.report({'ERROR'}, "3D Viewport에서 실행해야 합니다.")
@@ -205,6 +266,10 @@ class OBJECT_OT_move_each_selected_to_clicked_object(bpy.types.Operator):
 
         if active not in sources:
             sources.append(active)
+
+        self.affect_origins = context.scene.tool_settings.use_transform_data_origin
+        if not self._validate_origins(context, sources):
+            return {'CANCELLED'}
 
         self.source_names_json = json.dumps([obj.name for obj in sources])
         self.original_matrices_json = json.dumps({
@@ -267,6 +332,9 @@ class OBJECT_OT_move_each_selected_to_clicked_object(bpy.types.Operator):
             self.target_name = target.name
 
             # 클릭 즉시 기본 옵션으로 이동
+            if not self._validate_origins(context, self._get_source_objects()):
+                self._finish_pick_mode(context)
+                return {'CANCELLED'}
             self._restore_original_matrices()
             self._apply_transform_from_original()
 
@@ -276,7 +344,8 @@ class OBJECT_OT_move_each_selected_to_clicked_object(bpy.types.Operator):
 
             self.report(
                 {'INFO'},
-                "Moved. 왼쪽 아래 Adjust Last Operation 또는 F9에서 옵션 수정 가능."
+                ("피봇 정렬 완료. " if self.affect_origins else "Moved. ")
+                + "왼쪽 아래 Adjust Last Operation 또는 F9에서 옵션 수정 가능."
             )
 
             # FINISHED가 되어야 왼쪽 아래 Adjust Last Operation 패널이 뜸
@@ -293,6 +362,10 @@ class OBJECT_OT_move_each_selected_to_clicked_object(bpy.types.Operator):
             self.report({'ERROR'}, "Target Object가 없습니다.")
             return {'CANCELLED'}
 
+        self._capture_origin_mode(context)
+        if not self._validate_origins(context, self._get_source_objects()):
+            return {'CANCELLED'}
+
         self._restore_original_matrices()
         self._apply_transform_from_original()
         self._restore_selection(context)
@@ -302,6 +375,9 @@ class OBJECT_OT_move_each_selected_to_clicked_object(bpy.types.Operator):
 
     def draw(self, context):
         layout = self.layout
+
+        if self.affect_origins:
+            layout.label(text="Affect Only Origins", icon='OBJECT_ORIGIN')
 
         target = bpy.data.objects.get(self.target_name)
 
@@ -320,7 +396,10 @@ class OBJECT_OT_move_each_selected_to_clicked_object(bpy.types.Operator):
         row = box.row()
         col = row.column()
         col.label(text="Current Object")
-        col.prop(self, "source_reference_mode", text="")
+        if self.affect_origins:
+            col.label(text="Pivot / Origin")
+        else:
+            col.prop(self, "source_reference_mode", text="")
 
         col = row.column()
         col.label(text="Target Object")
@@ -335,6 +414,10 @@ class OBJECT_OT_move_each_selected_to_clicked_object(bpy.types.Operator):
         target = bpy.data.objects.get(self.target_name)
 
         if not sources or target is None:
+            return
+
+        if self.affect_origins:
+            self._apply_origins(sources, target)
             return
 
         target_anchor = self._get_reference_position(
@@ -427,16 +510,40 @@ class OBJECT_OT_move_each_selected_to_clicked_object(bpy.types.Operator):
             final_matrix.translation += location_delta
             obj.matrix_world = final_matrix
 
+    def _apply_origins(self, sources, target):
+        target_anchor = self._get_reference_position(target, self.target_reference_mode)
+        target_rotation = target.matrix_world.to_quaternion()
+        matrices = []
+        # Calculate before changing any parent or shared data.
+        for obj in sources:
+            matrix = obj.matrix_world.copy()
+            origin = matrix.translation.copy()
+            if self.apply_rotation:
+                rotation = matrix.to_quaternion()
+                delta = rotation.slerp(target_rotation, self.percent) @ rotation.inverted()
+                matrix = delta.to_matrix().to_4x4() @ matrix
+            matrix.translation = Vector(tuple(
+                self._blend_value(origin[i], target_anchor[i]) if enabled else origin[i]
+                for i, enabled in enumerate((self.use_x, self.use_y, self.use_z))
+            ))
+            matrices.append((obj, matrix))
+        for obj, matrix in sorted(matrices, key=lambda item: parent_depth(item[0])):
+            set_origin_matrix(obj, matrix)
+
     def _restore_original_matrices(self):
         try:
             original_data = json.loads(self.original_matrices_json)
         except Exception:
             return
 
-        for name, matrix_data in original_data.items():
-            obj = bpy.data.objects.get(name)
-            if obj:
-                obj.matrix_world = list_to_matrix(matrix_data)
+        objects = [(bpy.data.objects[name], list_to_matrix(data))
+                   for name, data in original_data.items() if name in bpy.data.objects]
+        for obj, matrix in sorted(objects, key=lambda item: parent_depth(item[0])):
+            if self.affect_origins:
+                set_origin_matrix(obj, matrix)
+            else:
+                obj.matrix_world = matrix
+        bpy.context.view_layer.update()
 
     def _get_source_names(self):
         try:
@@ -629,8 +736,9 @@ class OBJECT_OT_move_each_selected_to_clicked_object(bpy.types.Operator):
 
         target = self._pick_object_by_ray(context, event)
         target_name = target.name if target else "None"
+        mode = "Align Origins" if self.affect_origins else "Align Objects"
         context.workspace.status_text_set(
-            f"Pick target: {target_name} | ESC / Right Click cancels"
+            f"{mode} | Pick target: {target_name} | ESC / Right Click cancels"
         )
 
     def _pick_object_with_view_select(self, context, event):

@@ -16,6 +16,17 @@ _FIT_SHAPE_WIDTH = "_ta_curve_fit_width"
 _FIT_SHAPE_HEIGHT = "_ta_curve_fit_height"
 _FIT_SHAPE_RADIUS = "_ta_curve_fit_radius"
 _FIT_SHAPE_SIDES = "_ta_curve_fit_sides"
+_FIT_SHAPE_SEGMENTS = "_ta_curve_fit_segments"
+_FIT_SHAPE_LENGTH = "_ta_curve_fit_length"
+_FIT_SHAPE_PROFILE_SCALE = "_ta_curve_fit_profile_scale"
+_FIT_SHAPE_PROFILE_ROTATION = "_ta_curve_fit_profile_rotation"
+_FIT_SHAPE_PROFILE_FLIP = "_ta_curve_fit_profile_flip"
+_FIT_SHAPE_THICKNESS = "_ta_curve_fit_thickness"
+_FIT_SHAPE_CAPS = "_ta_curve_fit_caps"
+_SPLIT_CURVE_MARKER = "_ta_curve_fit_split_source"
+_SPLIT_CURVE_INDEX = "_ta_curve_fit_split_index"
+_SHAPE_TYPES = {'PLANE', 'CYLINDER', 'BOX', 'SWEEP'}
+_length_follow_guard = False
 
 
 def _point_co(point):
@@ -491,6 +502,173 @@ def _build_cylinder_shape(
     return verts, faces, diameter, diameter
 
 
+def _profile_source_spline(profile_obj):
+    if profile_obj is None or profile_obj.type != 'CURVE':
+        raise ValueError("Sweep needs a profile curve object")
+    for spline in profile_obj.data.splines:
+        if spline.type == 'BEZIER' and len(spline.bezier_points) >= 2:
+            return spline
+        if spline.type in {'POLY', 'NURBS'} and len(spline.points) >= 2:
+            return spline
+    raise ValueError("Profile curve has no usable spline")
+
+
+def _sample_profile_2d(profile_obj, scale=1.0, rotation_deg=0.0, flip=False):
+    """Profile local X/Y (like Curve to Mesh) -> 2D points, cyclic flag."""
+    spline = _profile_source_spline(profile_obj)
+    resolution = max(1, profile_obj.data.resolution_u)
+    cyclic = bool(spline.use_cyclic_u)
+    local_points = []
+
+    if spline.type == 'BEZIER':
+        points = spline.bezier_points
+        count = len(points)
+        segment_count = count if cyclic else count - 1
+        for index in range(segment_count):
+            p0 = points[index]
+            p1 = points[(index + 1) % count]
+            samples = interpolate_bezier(p0.co, p0.handle_right, p1.handle_left, p1.co, resolution + 1)
+            local_points.extend(sample.copy() for sample in samples[:-1])
+        if not cyclic:
+            local_points.append(points[-1].co.copy())
+    else:
+        local_points = [_point_co(point).copy() for point in spline.points]
+
+    angle = math.radians(rotation_deg)
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+    result = []
+    for point in local_points:
+        x = point.x * scale
+        y = point.y * scale
+        if flip:
+            x = -x
+        result.append((x * cos_a - y * sin_a, x * sin_a + y * cos_a))
+
+    cleaned = [result[0]]
+    for point in result[1:]:
+        if math.dist(point, cleaned[-1]) > 1e-9:
+            cleaned.append(point)
+    if cyclic and len(cleaned) > 2 and math.dist(cleaned[0], cleaned[-1]) <= 1e-9:
+        cleaned.pop()
+    if len(cleaned) < 2:
+        raise ValueError("Profile curve is too short")
+    return cleaned, cyclic
+
+
+def _thicken_open_profile(points, thickness):
+    """Offset an open 2D profile to both sides and return a closed loop."""
+    half = thickness * 0.5
+    normals = []
+    count = len(points)
+    for index in range(count):
+        p_prev = points[max(0, index - 1)]
+        p_next = points[min(count - 1, index + 1)]
+        tx = p_next[0] - p_prev[0]
+        ty = p_next[1] - p_prev[1]
+        length = math.hypot(tx, ty) or 1.0
+        normals.append((-ty / length, tx / length))
+    upper = [(p[0] + n[0] * half, p[1] + n[1] * half) for p, n in zip(points, normals)]
+    lower = [(p[0] - n[0] * half, p[1] - n[1] * half) for p, n in zip(points, normals)]
+    return upper + list(reversed(lower))
+
+
+def _profile_arc_lengths(points, cyclic):
+    lengths = [0.0]
+    for index in range(1, len(points)):
+        lengths.append(lengths[-1] + math.dist(points[index], points[index - 1]))
+    total = lengths[-1] + (math.dist(points[-1], points[0]) if cyclic else 0.0)
+    return lengths, total
+
+
+def _build_sweep_shape(
+    length,
+    profile_points,
+    profile_cyclic,
+    segments,
+    axis_index,
+    cross_a_index,
+    cross_b_index,
+    sign,
+    cyclic=False,
+    caps=True,
+):
+    """Straight sweep of a 2D profile along the deform axis.
+
+    Vertices are stored ring by ring (profile_count per ring) so ring-based
+    tools keep working. Returns verts, faces, face_uvs (world-unit UV per
+    corner), cross spans.
+    """
+    profile_count = len(profile_points)
+    ring_count = segments if cyclic else segments + 1
+    arc, profile_total = _profile_arc_lengths(profile_points, profile_cyclic)
+    verts = []
+    faces = []
+    face_uvs = []
+
+    for index in range(ring_count):
+        length_value = sign * length * (index / segments)
+        for cross_a, cross_b in profile_points:
+            verts.append(_shape_vertex(axis_index, cross_a_index, cross_b_index, length_value, cross_a, cross_b))
+
+    edge_count = profile_count if profile_cyclic else profile_count - 1
+    for index in range(segments):
+        ring = index * profile_count
+        next_ring = ((index + 1) % ring_count) * profile_count
+        u0 = length * (index / segments)
+        u1 = length * ((index + 1) / segments)
+        for k in range(edge_count):
+            k1 = (k + 1) % profile_count
+            v0 = arc[k]
+            v1 = profile_total if k1 == 0 else arc[k1]
+            faces.append((ring + k, ring + k1, next_ring + k1, next_ring + k))
+            face_uvs.append(((u0, v0), (u0, v1), (u1, v1), (u1, v0)))
+
+    cap_faces = 0
+    if caps and profile_cyclic and not cyclic and profile_count >= 3:
+        xs = [p[0] for p in profile_points]
+        ys = [p[1] for p in profile_points]
+        min_x, min_y = min(xs), min(ys)
+        cap_gap = 0.0
+        start = tuple(reversed(range(profile_count)))
+        end_ring = segments * profile_count
+        end = tuple(end_ring + k for k in range(profile_count))
+        for cap_index, face in enumerate((start, end)):
+            offset_u = cap_index * ((max(xs) - min_x) + cap_gap)
+            faces.append(face)
+            uvs = []
+            for vertex_index in face:
+                k = vertex_index % profile_count
+                uvs.append((offset_u + profile_points[k][0] - min_x, profile_total + profile_points[k][1] - min_y))
+            face_uvs.append(tuple(uvs))
+            cap_faces += 1
+
+    xs = [p[0] for p in profile_points]
+    ys = [p[1] for p in profile_points]
+    return verts, faces, face_uvs, (max(xs) - min(xs)), (max(ys) - min(ys)), profile_total, cap_faces
+
+
+def _set_face_uvs(mesh, face_uvs, scale):
+    uv_layer = mesh.uv_layers.new(name="UVMap")
+    for polygon, uvs in zip(mesh.polygons, face_uvs):
+        for loop_index, uv in zip(polygon.loop_indices, uvs):
+            uv_layer.data[loop_index].uv = (uv[0] * scale, uv[1] * scale)
+
+
+def _sweep_uv_scale(length, profile_total, cap_extent=0.0):
+    extent = max(length, profile_total + cap_extent, 1e-9)
+    return 1.0 / extent
+
+
+def _sweep_profile_points(obj_or_settings):
+    profile_obj, scale, rotation, flip, thickness = obj_or_settings
+    points, profile_cyclic = _sample_profile_2d(profile_obj, scale, rotation, flip)
+    if thickness > 0.0 and not profile_cyclic:
+        points = _thicken_open_profile(points, thickness)
+        profile_cyclic = True
+    return points, profile_cyclic
+
+
 def create_curve_fit_shape(
     context,
     curve_obj,
@@ -501,6 +679,13 @@ def create_curve_fit_shape(
     sides,
     segments,
     deform_axis,
+    profile_obj=None,
+    profile_scale=1.0,
+    profile_rotation=0.0,
+    profile_flip=False,
+    thickness=0.0,
+    caps=True,
+    follow_length=False,
 ):
     length = _curve_local_length(curve_obj)
     if length <= 0.0:
@@ -509,8 +694,27 @@ def create_curve_fit_shape(
     axis_index, cross_a_index, cross_b_index, sign = _shape_axis_setup(deform_axis)
     cyclic = _curve_fit_is_cyclic(curve_obj)
     segments = max(3 if cyclic else 1, segments)
+    face_uvs = None
 
-    if shape_type == 'PLANE':
+    if shape_type == 'SWEEP':
+        profile_points, profile_cyclic = _sweep_profile_points(
+            (profile_obj, profile_scale, profile_rotation, profile_flip, thickness)
+        )
+        verts, faces, face_uvs, cross_a_span, cross_b_span, profile_total, cap_faces = _build_sweep_shape(
+            length,
+            profile_points,
+            profile_cyclic,
+            segments,
+            axis_index,
+            cross_a_index,
+            cross_b_index,
+            sign,
+            cyclic,
+            caps,
+        )
+        cap_extent = cross_b_span if cap_faces else 0.0
+        object_name = f"{curve_obj.name}_Sweep"
+    elif shape_type == 'PLANE':
         verts, faces, cross_a_span, cross_b_span = _build_plane_shape(
             length,
             width,
@@ -571,18 +775,31 @@ def create_curve_fit_shape(
     obj[_FIT_SHAPE_HEIGHT] = height
     obj[_FIT_SHAPE_RADIUS] = radius
     obj[_FIT_SHAPE_SIDES] = sides
+    obj[_FIT_SHAPE_SEGMENTS] = segments
+    obj[_FIT_SHAPE_LENGTH] = length
+    obj.ta_curve_fit_follow_length = bool(follow_length)
+    if shape_type == 'SWEEP':
+        obj.ta_curve_fit_profile_curve = profile_obj
+        obj[_FIT_SHAPE_PROFILE_SCALE] = profile_scale
+        obj[_FIT_SHAPE_PROFILE_ROTATION] = profile_rotation
+        obj[_FIT_SHAPE_PROFILE_FLIP] = bool(profile_flip)
+        obj[_FIT_SHAPE_THICKNESS] = thickness
+        obj[_FIT_SHAPE_CAPS] = bool(caps)
     curve_obj.show_in_front = True
 
-    _set_curve_fit_uvs(
-        mesh,
-        axis_index,
-        cross_a_index,
-        cross_b_index,
-        sign * length,
-        cross_a_span,
-        cross_b_span,
-        cyclic,
-    )
+    if face_uvs is not None:
+        _set_face_uvs(mesh, face_uvs, _sweep_uv_scale(length, profile_total, cap_extent))
+    else:
+        _set_curve_fit_uvs(
+            mesh,
+            axis_index,
+            cross_a_index,
+            cross_b_index,
+            sign * length,
+            cross_a_span,
+            cross_b_span,
+            cyclic,
+        )
 
     for selected in context.selected_objects:
         selected.select_set(False)
@@ -621,7 +838,7 @@ def rebuild_generated_cyclic_shape(obj, modifier, segment_length):
         raise ValueError("Curve length is zero")
 
     shape_type = obj.get(_FIT_SHAPE_TYPE)
-    if shape_type not in {'PLANE', 'CYLINDER', 'BOX'}:
+    if shape_type not in _SHAPE_TYPES:
         raise ValueError("Cyclic shape metadata is missing; recreate the Curve Fit Shape")
 
     segments = max(3, math.ceil(length / segment_length))
@@ -630,6 +847,10 @@ def rebuild_generated_cyclic_shape(obj, modifier, segment_length):
     height = float(obj.get(_FIT_SHAPE_HEIGHT, 0.0))
     radius = float(obj.get(_FIT_SHAPE_RADIUS, 0.0))
     sides = max(3, int(obj.get(_FIT_SHAPE_SIDES, 3)))
+
+    if shape_type == 'SWEEP':
+        _rebuild_sweep_geometry(obj, length, segments, axis_index, cross_a_index, cross_b_index, sign, True)
+        return segments, length
 
     if shape_type == 'PLANE':
         verts, faces, cross_a_span, cross_b_span = _build_plane_shape(
@@ -683,7 +904,155 @@ def rebuild_generated_cyclic_shape(obj, modifier, segment_length):
         cross_b_span,
         True,
     )
+    obj[_FIT_SHAPE_SEGMENTS] = segments
+    obj[_FIT_SHAPE_LENGTH] = length
     return segments, length
+
+
+def _rebuild_sweep_geometry(obj, length, segments, axis_index, cross_a_index, cross_b_index, sign, cyclic):
+    profile_obj = obj.ta_curve_fit_profile_curve
+    profile_points, profile_cyclic = _sweep_profile_points((
+        profile_obj,
+        float(obj.get(_FIT_SHAPE_PROFILE_SCALE, 1.0)),
+        float(obj.get(_FIT_SHAPE_PROFILE_ROTATION, 0.0)),
+        bool(obj.get(_FIT_SHAPE_PROFILE_FLIP, False)),
+        float(obj.get(_FIT_SHAPE_THICKNESS, 0.0)),
+    ))
+    verts, faces, face_uvs, _a, cross_b_span, profile_total, cap_faces = _build_sweep_shape(
+        length,
+        profile_points,
+        profile_cyclic,
+        segments,
+        axis_index,
+        cross_a_index,
+        cross_b_index,
+        sign,
+        cyclic,
+        bool(obj.get(_FIT_SHAPE_CAPS, True)),
+    )
+    mesh = obj.data
+    mesh.clear_geometry()
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+    while mesh.uv_layers:
+        mesh.uv_layers.remove(mesh.uv_layers[0])
+    _set_face_uvs(mesh, face_uvs, _sweep_uv_scale(length, profile_total, cross_b_span if cap_faces else 0.0))
+    obj[_FIT_SHAPE_SEGMENTS] = segments
+    obj[_FIT_SHAPE_LENGTH] = length
+
+
+def follow_curve_length(obj, modifier=None):
+    """Stretch a generated shape along its deform axis to the current curve length.
+
+    Keeps vertex count, faces and UVs (manual UV edits survive); closed curves
+    close again because the mesh length equals the curve length.
+    Returns the scale factor applied, or None when nothing changed.
+    """
+    modifier = modifier or _curve_modifier_for_object(obj)
+    if modifier is None or modifier.object is None or not obj.get(_FIT_SHAPE_MARKER, False):
+        return None
+    old_length = float(obj.get(_FIT_SHAPE_LENGTH, 0.0))
+    new_length = _curve_local_length(modifier.object)
+    if old_length <= 0.0 or new_length <= 0.0 or abs(new_length - old_length) <= max(1e-7, old_length * 1e-6):
+        return None
+    axis_index, _positive = _axis_info(modifier.deform_axis)
+    if axis_index is None:
+        return None
+    factor = new_length / old_length
+    mesh = obj.data
+    if mesh.users > 1:
+        obj.data = mesh = mesh.copy()
+    coords = [0.0] * (len(mesh.vertices) * 3)
+    mesh.vertices.foreach_get("co", coords)
+    for index in range(axis_index, len(coords), 3):
+        coords[index] *= factor
+    mesh.vertices.foreach_set("co", coords)
+    mesh.update()
+    obj[_FIT_SHAPE_LENGTH] = new_length
+    return factor
+
+
+@bpy.app.handlers.persistent
+def _curve_fit_follow_length_handler(scene, depsgraph):
+    global _length_follow_guard
+    if _length_follow_guard:
+        return
+    changed_curves = set()
+    for update in depsgraph.updates:
+        update_id = update.id
+        if isinstance(update_id, bpy.types.Object) and update_id.type == 'CURVE' and update.is_updated_geometry:
+            changed_curves.add(update_id.original.name)
+        elif isinstance(update_id, bpy.types.Curve):
+            for obj in bpy.data.objects:
+                if obj.type == 'CURVE' and obj.data == update_id.original:
+                    changed_curves.add(obj.name)
+    if not changed_curves:
+        return
+    _length_follow_guard = True
+    try:
+        for obj in scene.objects:
+            if obj.type != 'MESH' or not getattr(obj, "ta_curve_fit_follow_length", False):
+                continue
+            modifier = _curve_modifier_for_object(obj)
+            if modifier is None or modifier.object is None or modifier.object.name not in changed_curves:
+                continue
+            try:
+                follow_curve_length(obj, modifier)
+            except Exception:
+                pass
+    finally:
+        _length_follow_guard = False
+
+
+def seam_twist_degrees(obj):
+    """For a cyclic generated shape: extra cross-section rotation at the seam
+    compared with the median ring-to-ring step (degrees). None if not cyclic."""
+    if not obj.get(_FIT_SHAPE_CYCLIC, False):
+        return None
+    segments = int(obj.get(_FIT_SHAPE_SEGMENTS, 0))
+    vert_count = len(obj.data.vertices)
+    if segments < 3 or vert_count % segments:
+        return None
+    ring_size = vert_count // segments
+    if ring_size < 2:
+        return None
+    bpy.context.view_layer.update()
+    evaluated = obj.evaluated_get(bpy.context.evaluated_depsgraph_get())
+    mesh = evaluated.to_mesh()
+    try:
+        if len(mesh.vertices) != vert_count:
+            return None
+        rings = []
+        for ring in range(segments):
+            base = ring * ring_size
+            pts = [mesh.vertices[base + k].co.copy() for k in range(ring_size)]
+            center = sum(pts, Vector()) / ring_size
+            far = max(range(ring_size), key=lambda k: (pts[k] - pts[0]).length)
+            rings.append((center, pts[far] - pts[0]))
+    finally:
+        evaluated.to_mesh_clear()
+
+    def step(a, b, tangent):
+        va = a - tangent * a.dot(tangent)
+        vb = b - tangent * b.dot(tangent)
+        if va.length < 1e-9 or vb.length < 1e-9:
+            return 0.0
+        return math.degrees(va.angle(vb))
+
+    steps = []
+    for ring in range(segments):
+        nxt = (ring + 1) % segments
+        tangent = (rings[nxt][0] - rings[ring - 1][0])
+        if tangent.length < 1e-12:
+            continue
+        tangent.normalize()
+        steps.append(step(rings[ring][1], rings[nxt][1], tangent))
+    if len(steps) < 3:
+        return None
+    seam = steps[-1]
+    others = sorted(steps[:-1])
+    median = others[len(others) // 2]
+    return max(0.0, seam - median)
 
 
 def _curve_modifier_for_object(obj, curve_obj=None):
@@ -1177,6 +1546,155 @@ def fit_object_to_curve_modifier(context, obj, modifier):
     return curve_obj, curve_length
 
 
+def _usable_splines(curve_obj):
+    result = []
+    for spline in curve_obj.data.splines:
+        if spline.type == 'BEZIER' and len(spline.bezier_points) >= 2:
+            result.append(spline)
+        elif spline.type in {'POLY', 'NURBS'} and len(spline.points) >= 2:
+            result.append(spline)
+    return result
+
+
+def _evaluated_curve_splines(curve_obj):
+    """Curves after the leading Geometry Nodes modifiers that still output curves
+    (e.g. relax/normalize), before the modifier that turns them into a mesh.
+    Returns list of dicts (positions, radius, tilt, cyclic) or None."""
+    node_mods = [m for m in curve_obj.modifiers]
+    if not node_mods:
+        return None
+    saved = [m.show_viewport for m in node_mods]
+    best = None
+    try:
+        for keep in range(len(node_mods), 0, -1):
+            for index, modifier in enumerate(node_mods):
+                modifier.show_viewport = saved[index] and index < keep
+            bpy.context.view_layer.update()
+            evaluated = curve_obj.evaluated_get(bpy.context.evaluated_depsgraph_get())
+            try:
+                geometry = evaluated.evaluated_geometry()
+            except Exception:
+                return None
+            curves = geometry.curves
+            if curves is None or len(curves.points) == 0:
+                continue
+            attrs = curves.attributes
+            count = len(curves.points)
+            positions = [0.0] * (count * 3)
+            attrs["position"].data.foreach_get("vector", positions)
+
+            def read(name, default):
+                attr = attrs.get(name)
+                if attr is None or attr.domain != 'POINT':
+                    return [default] * count
+                values = [0.0] * count
+                attr.data.foreach_get("value", values)
+                return values
+
+            radius = read("radius", 1.0)
+            tilt = read("tilt", 0.0)
+            curve_count = len(curves.curves)
+            types = [1] * curve_count
+            if attrs.get("curve_type") is not None:
+                attrs["curve_type"].data.foreach_get("value", types)
+            cyclic = [False] * curve_count
+            if attrs.get("cyclic") is not None:
+                attrs["cyclic"].data.foreach_get("value", cyclic)
+            if any(t != 1 for t in types):
+                continue  # only poly curves give exact evaluated shape
+            splines = []
+            for curve_index, curve in enumerate(curves.curves):
+                start = curve.first_point_index
+                size = curve.points_length
+                splines.append({
+                    "positions": [Vector(positions[(start + k) * 3:(start + k) * 3 + 3]) for k in range(size)],
+                    "radius": radius[start:start + size],
+                    "tilt": tilt[start:start + size],
+                    "cyclic": bool(cyclic[curve_index]),
+                })
+            best = (keep, splines)
+            break
+    finally:
+        for modifier, value in zip(node_mods, saved):
+            modifier.show_viewport = value
+        bpy.context.view_layer.update()
+    if best is None or best[0] == 0:
+        return None
+    return best[1]
+
+
+def _copy_curve_settings(source, target):
+    for attr in ("dimensions", "twist_mode", "twist_smooth", "use_radius", "use_stretch",
+                 "use_deform_bounds", "resolution_u", "use_path"):
+        if hasattr(source, attr):
+            try:
+                setattr(target, attr, getattr(source, attr))
+            except Exception:
+                pass
+
+
+def split_curve_splines(context, curve_obj, use_evaluated=True):
+    """One curve object per spline; the source curve is left untouched.
+    Returns (list of new curve objects, used_evaluated_shape)."""
+    evaluated = _evaluated_curve_splines(curve_obj) if use_evaluated else None
+    control = _usable_splines(curve_obj)
+    count = len(evaluated) if evaluated is not None else len(control)
+    if count == 0:
+        raise ValueError("Curve has no usable splines")
+
+    parent_collection = curve_obj.users_collection[0] if curve_obj.users_collection else context.scene.collection
+    collection_name = f"{curve_obj.name} · Curve Fit"
+    collection = bpy.data.collections.get(collection_name)
+    if collection is None:
+        collection = bpy.data.collections.new(collection_name)
+        parent_collection.children.link(collection)
+
+    created = []
+    for index in range(count):
+        data = bpy.data.curves.new(f"{curve_obj.name}_spline_{index:02d}", type='CURVE')
+        _copy_curve_settings(curve_obj.data, data)
+        if evaluated is not None:
+            info = evaluated[index]
+            spline = data.splines.new('POLY')
+            spline.points.add(len(info["positions"]) - 1)
+            for point, co, radius, tilt in zip(spline.points, info["positions"], info["radius"], info["tilt"]):
+                point.co = (co.x, co.y, co.z, 1.0)
+                point.radius = radius
+                point.tilt = tilt
+            spline.use_cyclic_u = info["cyclic"]
+        else:
+            source = control[index]
+            spline = data.splines.new(source.type)
+            if source.type == 'BEZIER':
+                spline.bezier_points.add(len(source.bezier_points) - 1)
+                for dst, src in zip(spline.bezier_points, source.bezier_points):
+                    dst.co = src.co
+                    dst.handle_left_type = src.handle_left_type
+                    dst.handle_right_type = src.handle_right_type
+                    dst.handle_left = src.handle_left
+                    dst.handle_right = src.handle_right
+                    dst.radius = src.radius
+                    dst.tilt = src.tilt
+            else:
+                spline.points.add(len(source.points) - 1)
+                for dst, src in zip(spline.points, source.points):
+                    dst.co = src.co
+                    dst.radius = src.radius
+                    dst.tilt = src.tilt
+                if source.type == 'NURBS':
+                    spline.order_u = source.order_u
+                    spline.use_endpoint_u = source.use_endpoint_u
+            spline.use_cyclic_u = source.use_cyclic_u
+            spline.resolution_u = source.resolution_u
+        new_obj = bpy.data.objects.new(f"{curve_obj.name}_spline_{index:02d}", data)
+        new_obj.matrix_world = curve_obj.matrix_world.copy()
+        new_obj[_SPLIT_CURVE_MARKER] = curve_obj.name
+        new_obj[_SPLIT_CURVE_INDEX] = index
+        collection.objects.link(new_obj)
+        created.append(new_obj)
+    return created, evaluated is not None
+
+
 class TA_OT_create_curve_fit_plane(bpy.types.Operator):
     bl_idname = "object.ta_create_curve_fit_plane"
     bl_label = "Create Curve Fit Shape"
@@ -1188,26 +1706,86 @@ class TA_OT_create_curve_fit_plane(bpy.types.Operator):
         obj = context.active_object
         return obj is not None and obj.type == 'CURVE' and context.mode == 'OBJECT'
 
+    def _create_one(self, context, curve_obj):
+        scene = context.scene
+        return create_curve_fit_shape(
+            context,
+            curve_obj,
+            scene.ta_curve_fit_shape_type,
+            _cm_to_scene_units(context, scene.ta_curve_fit_width_cm),
+            _cm_to_scene_units(context, scene.ta_curve_fit_height_cm),
+            _cm_to_scene_units(context, scene.ta_curve_fit_radius_cm),
+            scene.ta_curve_fit_cylinder_sides,
+            scene.ta_curve_fit_plane_segments,
+            scene.ta_curve_fit_plane_deform_axis,
+            profile_obj=scene.ta_curve_fit_profile_object,
+            profile_scale=scene.ta_curve_fit_profile_scale,
+            profile_rotation=scene.ta_curve_fit_profile_rotation,
+            profile_flip=scene.ta_curve_fit_profile_flip,
+            thickness=_cm_to_scene_units(context, scene.ta_curve_fit_sweep_thickness_cm),
+            caps=scene.ta_curve_fit_sweep_caps,
+            follow_length=scene.ta_curve_fit_follow_length_default,
+        )
+
     def execute(self, context):
         scene = context.scene
         curve_obj = context.active_object
         rig_obj = None
 
+        if scene.ta_curve_fit_shape_type == 'SWEEP':
+            profile = scene.ta_curve_fit_profile_object
+            if profile is None or profile.type != 'CURVE':
+                self.report({'WARNING'}, "Pick a profile curve for Sweep")
+                return {'CANCELLED'}
+            if profile == curve_obj:
+                self.report({'WARNING'}, "The profile curve must be a different object")
+                return {'CANCELLED'}
+
+        if len(_usable_splines(curve_obj)) > 1 or (
+            scene.ta_curve_fit_split_splines and curve_obj.modifiers and scene.ta_curve_fit_split_use_evaluated
+        ):
+            if not scene.ta_curve_fit_split_splines:
+                self.report({'WARNING'}, "Curve has several splines; enable 'One Mesh Per Spline'")
+                return {'CANCELLED'}
+            if scene.ta_curve_fit_generate_chain_rig:
+                self.report({'WARNING'}, "Chain Rig is not created when splitting splines; build it per spline afterwards")
+            try:
+                split_curves, used_evaluated = split_curve_splines(
+                    context, curve_obj, scene.ta_curve_fit_split_use_evaluated
+                )
+                created = []
+                twist_notes = []
+                for split_curve in split_curves:
+                    obj, length = self._create_one(context, split_curve)
+                    for collection in list(obj.users_collection):
+                        collection.objects.unlink(obj)
+                    split_curve.users_collection[0].objects.link(obj)
+                    created.append(obj)
+                    twist = seam_twist_degrees(obj)
+                    if twist is not None and twist > 5.0:
+                        twist_notes.append(f"{obj.name} seam twist {twist:.1f}°")
+            except ValueError as exc:
+                self.report({'WARNING'}, str(exc))
+                return {'CANCELLED'}
+            for selected in context.selected_objects:
+                selected.select_set(False)
+            for obj in created:
+                obj.select_set(True)
+            context.view_layer.objects.active = created[0]
+            source_note = "evaluated shape" if used_evaluated else "control points"
+            message = f"Created {len(created)} meshes from {len(split_curves)} splines ({source_note})"
+            if twist_notes:
+                message += " / " + ", ".join(twist_notes)
+                self.report({'WARNING'}, message)
+            else:
+                self.report({'INFO'}, message)
+            return {'FINISHED'}
+
         try:
             if scene.ta_curve_fit_generate_chain_rig:
                 _sample_chain_points_world(curve_obj, scene.ta_curve_fit_chain_bone_count)
 
-            obj, length = create_curve_fit_shape(
-                context,
-                curve_obj,
-                scene.ta_curve_fit_shape_type,
-                _cm_to_scene_units(context, scene.ta_curve_fit_width_cm),
-                _cm_to_scene_units(context, scene.ta_curve_fit_height_cm),
-                _cm_to_scene_units(context, scene.ta_curve_fit_radius_cm),
-                scene.ta_curve_fit_cylinder_sides,
-                scene.ta_curve_fit_plane_segments,
-                scene.ta_curve_fit_plane_deform_axis,
-            )
+            obj, length = self._create_one(context, curve_obj)
 
             if scene.ta_curve_fit_generate_chain_rig:
                 modifier = _curve_modifier_for_object(obj, curve_obj)
@@ -1223,7 +1801,34 @@ class TA_OT_create_curve_fit_plane(bpy.types.Operator):
             return {'CANCELLED'}
 
         rig_message = f" / rig {rig_obj.name}" if rig_obj is not None else ""
+        twist = seam_twist_degrees(obj)
+        if twist is not None and twist > 5.0:
+            self.report({'WARNING'}, f"Created {obj.name} / seam twist {twist:.1f}° (adjust curve tilt)")
+            return {'FINISHED'}
         self.report({'INFO'}, f"Created {obj.name} / length {length:.4f}{rig_message}")
+        return {'FINISHED'}
+
+
+class TA_OT_curve_fit_follow_length(bpy.types.Operator):
+    bl_idname = "object.ta_curve_fit_follow_length"
+    bl_label = "Match Curve Length"
+    bl_description = "Stretch the generated shape to the current curve length without changing topology or UVs"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT'
+
+    def execute(self, context):
+        targets = [obj for obj in context.selected_objects if obj.type == 'MESH' and obj.get(_FIT_SHAPE_MARKER, False)]
+        if not targets:
+            obj, _modifier = _find_curve_fit_target(context)
+            targets = [obj] if obj is not None and obj.get(_FIT_SHAPE_MARKER, False) else []
+        if not targets:
+            self.report({'WARNING'}, "Select generated Curve Fit shapes")
+            return {'CANCELLED'}
+        changed = sum(1 for obj in targets if follow_curve_length(obj) is not None)
+        self.report({'INFO'}, f"Matched {changed} of {len(targets)} shapes to their curve length")
         return {'FINISHED'}
 
 
@@ -1416,6 +2021,13 @@ class TA_PT_curve_fit_plane_panel(bpy.types.Panel):
         if scene.ta_curve_fit_shape_type == 'CYLINDER':
             col.prop(scene, "ta_curve_fit_radius_cm")
             col.prop(scene, "ta_curve_fit_cylinder_sides")
+        elif scene.ta_curve_fit_shape_type == 'SWEEP':
+            col.prop(scene, "ta_curve_fit_profile_object")
+            col.prop(scene, "ta_curve_fit_profile_scale")
+            col.prop(scene, "ta_curve_fit_profile_rotation")
+            col.prop(scene, "ta_curve_fit_profile_flip")
+            col.prop(scene, "ta_curve_fit_sweep_thickness_cm")
+            col.prop(scene, "ta_curve_fit_sweep_caps")
         else:
             col.prop(scene, "ta_curve_fit_width_cm")
             if scene.ta_curve_fit_shape_type == 'BOX':
@@ -1423,9 +2035,21 @@ class TA_PT_curve_fit_plane_panel(bpy.types.Panel):
         col.prop(scene, "ta_curve_fit_plane_segments")
         col.prop(scene, "ta_curve_fit_plane_deform_axis")
 
+        split_col = layout.column(align=True)
+        split_col.prop(scene, "ta_curve_fit_split_splines")
+        sub = split_col.row()
+        sub.enabled = scene.ta_curve_fit_split_splines
+        sub.prop(scene, "ta_curve_fit_split_use_evaluated")
+        split_col.prop(scene, "ta_curve_fit_follow_length_default")
+
         row = layout.row()
         row.enabled = obj is not None and obj.type == 'CURVE'
         row.operator("object.ta_create_curve_fit_plane", icon='MOD_CURVE')
+
+        if obj is not None and obj.type == 'MESH' and obj.get(_FIT_SHAPE_MARKER, False):
+            shape_box = layout.box()
+            shape_box.prop(obj, "ta_curve_fit_follow_length")
+            shape_box.operator("object.ta_curve_fit_follow_length", icon='DRIVER_DISTANCE')
 
         rig_box = layout.box()
         rig_box.prop(scene, "ta_curve_fit_generate_chain_rig")
@@ -1450,8 +2074,13 @@ classes = (
     TA_OT_fit_object_to_curve,
     TA_OT_segment_object_by_length,
     TA_OT_build_curve_fit_chain_rig,
+    TA_OT_curve_fit_follow_length,
     TA_PT_curve_fit_plane_panel,
 )
+
+
+def _is_curve_object(_self, obj):
+    return obj.type == 'CURVE'
 
 
 def register():
@@ -1472,7 +2101,72 @@ def register():
             ('PLANE', 'Plane', 'Create a flat ribbon shape'),
             ('CYLINDER', 'Cylinder', 'Create a round tube shape'),
             ('BOX', 'Box', 'Create a rectangular box shape'),
+            ('SWEEP', 'Sweep', 'Sweep a profile curve (local X/Y) along the curve as a real mesh with UVs'),
         ),
+    )
+    bpy.types.Object.ta_curve_fit_profile_curve = PointerProperty(
+        name="Sweep Profile",
+        type=bpy.types.Object,
+        poll=_is_curve_object,
+        description="Profile curve used to build this Sweep shape",
+    )
+    bpy.types.Object.ta_curve_fit_follow_length = BoolProperty(
+        name="Follow Curve Length",
+        default=False,
+        description="Automatically stretch this shape when its curve length changes (keeps topology and UVs)",
+    )
+    bpy.types.Scene.ta_curve_fit_profile_object = PointerProperty(
+        name="Profile",
+        type=bpy.types.Object,
+        poll=_is_curve_object,
+        description="Profile curve; its local X/Y is swept along the target curve",
+    )
+    bpy.types.Scene.ta_curve_fit_profile_scale = FloatProperty(
+        name="Profile Scale",
+        default=1.0,
+        min=0.0001,
+        soft_max=100.0,
+        description="Uniform scale applied to the profile before sweeping",
+    )
+    bpy.types.Scene.ta_curve_fit_profile_rotation = FloatProperty(
+        name="Profile Rotation",
+        default=0.0,
+        soft_min=-180.0,
+        soft_max=180.0,
+        description="Rotate the profile around the curve direction (degrees)",
+    )
+    bpy.types.Scene.ta_curve_fit_profile_flip = BoolProperty(
+        name="Flip Profile",
+        default=False,
+        description="Mirror the profile X axis",
+    )
+    bpy.types.Scene.ta_curve_fit_sweep_thickness_cm = FloatProperty(
+        name="Thickness (cm)",
+        default=0.0,
+        min=0.0,
+        soft_max=10.0,
+        precision=3,
+        description="Give an open profile thickness by offsetting it to both sides (0 keeps a single sheet)",
+    )
+    bpy.types.Scene.ta_curve_fit_sweep_caps = BoolProperty(
+        name="Cap Ends",
+        default=True,
+        description="Close both ends of a closed profile on an open curve",
+    )
+    bpy.types.Scene.ta_curve_fit_split_splines = BoolProperty(
+        name="One Mesh Per Spline",
+        default=True,
+        description="Split a multi-spline curve into one curve object per spline (source left untouched) and build one mesh for each",
+    )
+    bpy.types.Scene.ta_curve_fit_split_use_evaluated = BoolProperty(
+        name="Use Evaluated Shape",
+        default=True,
+        description="When the curve has Geometry Nodes, copy the curve after the curve-only modifiers (relax/normalize) instead of the raw control points",
+    )
+    bpy.types.Scene.ta_curve_fit_follow_length_default = BoolProperty(
+        name="Follow Curve Length",
+        default=False,
+        description="New shapes stretch automatically when their curve length changes (keeps topology and UVs)",
     )
     bpy.types.Scene.ta_curve_fit_width_cm = FloatProperty(
         name="Width (cm)",
@@ -1568,11 +2262,27 @@ def register():
 
     for cls in classes:
         bpy.utils.register_class(cls)
+    if _curve_fit_follow_length_handler not in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.append(_curve_fit_follow_length_handler)
 
 
 def unregister():
+    if _curve_fit_follow_length_handler in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(_curve_fit_follow_length_handler)
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+
+    del bpy.types.Scene.ta_curve_fit_follow_length_default
+    del bpy.types.Scene.ta_curve_fit_split_use_evaluated
+    del bpy.types.Scene.ta_curve_fit_split_splines
+    del bpy.types.Scene.ta_curve_fit_sweep_caps
+    del bpy.types.Scene.ta_curve_fit_sweep_thickness_cm
+    del bpy.types.Scene.ta_curve_fit_profile_flip
+    del bpy.types.Scene.ta_curve_fit_profile_rotation
+    del bpy.types.Scene.ta_curve_fit_profile_scale
+    del bpy.types.Scene.ta_curve_fit_profile_object
+    del bpy.types.Object.ta_curve_fit_follow_length
+    del bpy.types.Object.ta_curve_fit_profile_curve
 
     del bpy.types.Scene.ta_curve_fit_end_boost
     del bpy.types.Scene.ta_curve_fit_curvature_boost

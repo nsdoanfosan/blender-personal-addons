@@ -2046,6 +2046,12 @@ class TA_PT_curve_fit_plane_panel(bpy.types.Panel):
         row.enabled = obj is not None and obj.type == 'CURVE'
         row.operator("object.ta_create_curve_fit_plane", icon='MOD_CURVE')
 
+        unbend_box = layout.box()
+        unbend_box.label(text="Reverse: bent mesh -> curve + straight mesh")
+        unbend_row = unbend_box.row()
+        unbend_row.enabled = obj is not None and obj.type in {'MESH', 'CURVE'}
+        unbend_row.operator("object.ta_unbend_mesh_to_curve", icon='MOD_SIMPLEDEFORM')
+
         if obj is not None and obj.type == 'MESH' and obj.get(_FIT_SHAPE_MARKER, False):
             shape_box = layout.box()
             shape_box.prop(obj, "ta_curve_fit_follow_length")
@@ -2264,9 +2270,13 @@ def register():
         bpy.utils.register_class(cls)
     if _curve_fit_follow_length_handler not in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.append(_curve_fit_follow_length_handler)
+    from . import curve_unbend
+    curve_unbend.register()
 
 
 def unregister():
+    from . import curve_unbend
+    curve_unbend.unregister()
     if _curve_fit_follow_length_handler in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.remove(_curve_fit_follow_length_handler)
     for cls in reversed(classes):

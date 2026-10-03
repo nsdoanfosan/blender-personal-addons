@@ -106,6 +106,11 @@ c = rep["created"][0]
 assert c["cyclic"], c
 assert c["roundtrip_p50_p95_max"][1] / c["size"] < 0.01, c
 assert c["roundtrip_p50_p95_max"][2] / c["size"] < 0.03, c
+ring_straight = bpy.data.objects[c["mesh"]].data
+xs = np.array([v.co.x for v in ring_straight.vertices])
+spans = [max(xs[list(p.vertices)]) - min(xs[list(p.vertices)]) for p in ring_straight.polygons]
+assert max(spans) < c["length"] * 0.25, max(spans)   # seam opened: no face wraps the strip
+assert abs(np.ptp(xs) - c["length"]) < c["length"] * 0.1, (np.ptp(xs), c["length"])
 
 # 3) attribute mode: give the baked ribbon cloth_path_* attributes
 arc = poly_curve("Arc", [(0, 5, 0), (2, 7, 0), (4, 5, 0.5)], bezier=True)

@@ -509,6 +509,51 @@ def _unbend_coords(curve_obj, pos, expected, length, cyclic, collection, samples
     return out
 
 
+def _split_cyclic_seam(mesh, length):
+    """Open a closed part in straight space: faces that wrap across the whole
+    length get their own copies of the start-side vertices, moved by +length.
+    On a cyclic curve x and x+length land on the same point, so the bent
+    result stays closed while the straight mesh becomes a clean strip.
+    Returns the source vertex index of every vertex after the split."""
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    src = bm.verts.layers.int.new("_ta_unbend_src")
+    for v in bm.verts:
+        v[src] = v.index
+    half = length * 0.5
+
+    def wraps(face):
+        xs = [v.co.x for v in face.verts]
+        return max(xs) - min(xs) > half
+
+    wrap_faces = {f for f in bm.faces if wraps(f)}
+    if wrap_faces:
+        seam_edges = []
+        for edge in bm.edges:
+            if all(v.co.x < half for v in edge.verts):
+                adjacent = list(edge.link_faces)
+                if any(f in wrap_faces for f in adjacent) and any(f not in wrap_faces for f in adjacent):
+                    seam_edges.append(edge)
+        if seam_edges:
+            bmesh.ops.split_edges(bm, edges=seam_edges)
+        moved = set()
+        for face in list(bm.faces):
+            if not wraps(face):
+                continue
+            for v in face.verts:
+                if v.co.x < half and v not in moved:
+                    if all(wraps(f) for f in v.link_faces):
+                        v.co.x += length
+                        moved.add(v)
+    bm.verts.ensure_lookup_table()
+    src_index = np.array([v[src] for v in bm.verts], np.int64)
+    bm.verts.layers.int.remove(src)
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.update()
+    return src_index
+
+
 # --------------------------------------------------------------------- parts
 
 def _part_mesh(source_mesh, vert_mask, name):
@@ -603,6 +648,10 @@ def unbend_object(context, obj, control_points=12, samples=128, fit_tilt=True,
                 straight = _unbend_coords(curve, pos, expected, length, cyclic, collection, samples)
                 pmesh.vertices.foreach_set("co", straight.astype(np.float32).ravel())
                 pmesh.update()
+                src_index = np.arange(len(pos))
+                if cyclic:
+                    src_index = _split_cyclic_seam(pmesh, length)
+                    straight = _mesh_positions(pmesh)
                 if generate_uv and len(pmesh.uv_layers) == 0:
                     uv = pmesh.uv_layers.new(name="UVMap")
                     lv = np.zeros(len(pmesh.loops), np.int64)
@@ -630,7 +679,7 @@ def unbend_object(context, obj, control_points=12, samples=128, fit_tilt=True,
                 em = ev.to_mesh()
                 back = _mesh_positions(em)
                 ev.to_mesh_clear()
-                err = np.linalg.norm(back - pos, axis=1)
+                err = np.linalg.norm(back - pos[src_index], axis=1)
                 size = float(np.linalg.norm(np.ptp(pos, axis=0)))
                 stats = [float(np.percentile(err, 50)), float(np.percentile(err, 95)), float(err.max())]
                 mobj[_UNBEND_ERROR] = [x * 1000.0 for x in stats]

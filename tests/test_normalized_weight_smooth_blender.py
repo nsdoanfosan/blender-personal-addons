@@ -6,6 +6,7 @@ import math
 from pathlib import Path
 import sys
 import unittest
+from types import SimpleNamespace
 
 import addon_utils
 import bmesh
@@ -14,6 +15,61 @@ import bpy
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'addons'))
 from normalized_weight_smooth.core import WeightError, smooth_weights
+from normalized_weight_smooth import active_group_hud
+
+
+class HudTests(unittest.TestCase):
+    def setUp(self):
+        self.mesh = bpy.data.meshes.new('HUD_Test')
+        self.obj = bpy.data.objects.new('HUD_Mesh', self.mesh)
+        self.context = SimpleNamespace(
+            scene=SimpleNamespace(handy_weight_edit_props=SimpleNamespace(toggle_vertex_weight=True)),
+            active_object=self.obj, preferences=SimpleNamespace(addons={}))
+
+    def tearDown(self):
+        bpy.data.objects.remove(self.obj, do_unlink=True)
+        bpy.data.meshes.remove(self.mesh)
+
+    def test_group_switch_rename_lock_and_delete(self):
+        first = self.obj.vertex_groups.new(name='Spine')
+        second = self.obj.vertex_groups.new(name='팔_L')
+        self.obj.vertex_groups.active_index = first.index
+        self.assertEqual(active_group_hud.label_state(self.context)[1], 'Spine')
+        self.obj.vertex_groups.active_index = second.index
+        second.name = '팔_R'
+        second.lock_weight = True
+        before = (self.obj.vertex_groups.active_index, self.obj.mode)
+        self.assertEqual(active_group_hud.label_state(self.context)[1:3], ('팔_R', True))
+        self.assertEqual((self.obj.vertex_groups.active_index, self.obj.mode), before)
+        self.obj.vertex_groups.clear()
+        self.assertEqual(active_group_hud.label_state(self.context)[1], 'No active vertex group')
+
+    def test_handy_off_missing_mesh_and_user_hide(self):
+        self.context.scene.handy_weight_edit_props.toggle_vertex_weight = False
+        self.assertIsNone(active_group_hud.label_state(self.context))
+        self.context.scene.handy_weight_edit_props.toggle_vertex_weight = True
+        self.context.active_object = None
+        self.assertIsNone(active_group_hud.label_state(self.context))
+        self.context.active_object = self.obj
+        prefs = SimpleNamespace(show_group_hud=False, group_hud_corner='TOP_RIGHT')
+        self.context.preferences.addons['normalized_weight_smooth'] = SimpleNamespace(preferences=prefs)
+        self.assertIsNone(active_group_hud.label_state(self.context))
+        prefs.show_group_hud = True
+        self.assertEqual(active_group_hud.label_state(self.context)[3], 'TOP_RIGHT')
+        self.context.scene = SimpleNamespace()
+        self.assertIsNone(active_group_hud.label_state(self.context))
+
+    def test_wrap_keeps_complete_unicode_group_name(self):
+        name = 'CC_Base_팔_L_긴그룹이름_0123456789'
+        lines = active_group_hud._wrap(name, 7, len)
+        self.assertEqual(''.join(lines), name)
+        self.assertTrue(all(len(line) <= 7 for line in lines))
+
+    def test_placement_excludes_overlapping_sidebar_and_toolbar(self):
+        context = SimpleNamespace(region=SimpleNamespace(x=100, width=1000),
+            area=SimpleNamespace(regions=[SimpleNamespace(type='TOOLS', x=100, width=50),
+                                         SimpleNamespace(type='UI', x=800, width=300)]))
+        self.assertEqual(active_group_hud._visible_bounds(context), (50, 700))
 
 
 class CoreTests(unittest.TestCase):
@@ -268,6 +324,7 @@ class BlenderTests(unittest.TestCase):
 
 if __name__ == '__main__':
     suite = unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromTestCase(CoreTests),
+                               unittest.defaultTestLoader.loadTestsFromTestCase(HudTests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(BlenderTests)])
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     print('NWS_RESULT=' + json.dumps({'tests': result.testsRun,

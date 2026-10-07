@@ -1,9 +1,9 @@
-"""Handy Weight Edit companion: smooth the whole selected weight vector."""
+"""Handy Weight Edit companion: normalized smoothing and active-group HUD."""
 
 bl_info = {
     "name": "Selected All Weights Smooth",
     "author": "PARK / Codex",
-    "version": (1, 0, 0),
+    "version": (1, 1, 0),
     "blender": (4, 2, 0),
     "location": "3D View > Skinning > Handy Weight Edit; Ctrl+Shift+E",
     "description": "Smooth all selected skin influences together, with total weight 1",
@@ -14,6 +14,7 @@ import bpy
 import bmesh
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty
 from .core import WeightError, smooth_weights
+from . import active_group_hud
 
 _keymaps = []
 _handy_panel = None
@@ -46,11 +47,18 @@ class NWS_Preferences(bpy.types.AddonPreferences):
     iterations: _iterations()
     use_outside: _outside()
     group_scope: _scope()
+    show_group_hud: BoolProperty(name="Show Active Group in Viewport", default=True,
+                                description="Show the active vertex group while Handy's Vertex Weight Toggle is on")
+    group_hud_corner: EnumProperty(name="Group Label Position", default='BOTTOM_LEFT', items=[
+        ('BOTTOM_LEFT', "Bottom Left", "Above the last-operation panel"),
+        ('TOP_RIGHT', "Top Right", "Below the navigation gizmo, beside the sidebar"),
+    ])
 
     def draw(self, context):
         self.layout.label(text="Edit Mode: select vertices, then Ctrl+Shift+E.")
         self.layout.label(text="Weight Paint: enable vertex or face selection masking.")
-        for prop in ('factor', 'iterations', 'use_outside', 'group_scope'):
+        for prop in ('factor', 'iterations', 'use_outside', 'group_scope',
+                     'show_group_hud', 'group_hud_corner'):
             self.layout.prop(self, prop)
 
 
@@ -183,6 +191,9 @@ def draw_tools(layout, context):
     box.prop(prefs, 'use_outside')
     box.operator(NWS_OT_smooth.bl_idname, text="Smooth All Selected Weights", icon='MOD_SMOOTH')
     box.label(text="Selected vertices only · Total 1 · Keep locks")
+    box.prop(prefs, 'show_group_hud')
+    if prefs.show_group_hud:
+        box.prop(prefs, 'group_hud_corner')
 
 
 def _draw_handy(self, context):
@@ -236,10 +247,12 @@ def register():
             _keymaps.append((km, kmi))
     _attach_handy()
     bpy.app.timers.register(_attach_handy, first_interval=2.0, persistent=True)
+    active_group_hud.register()
 
 
 def unregister():
     global _handy_panel
+    active_group_hud.unregister()
     if bpy.app.timers.is_registered(_attach_handy):
         bpy.app.timers.unregister(_attach_handy)
     if _handy_panel:

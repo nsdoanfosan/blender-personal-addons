@@ -11,6 +11,21 @@ Skinning panel. **F9** changes Strength, Iterations, group scope and boundary sa
 for the last operation; **Ctrl+Z** undoes the complete operation.
 Panel settings are defaults for subsequent shortcut invocations.
 
+## Handy active vertex group label
+
+With Handy's **Vertex Weight Toggle** enabled, the active mesh's vertex group
+name appears at the **bottom left of the 3D viewport**, even when the N panel
+is closed. It also shows the mesh name and `[Locked]` for a locked group.
+Switching, renaming or deleting a group updates the label automatically;
+no active group is reported explicitly. Turning Handy's toggle off hides it.
+Blender's Show Overlays toggle also hides the label.
+
+**Show Active Group in Viewport** and **Group Label Position** are available
+below the existing smoothing tools and in this companion's preferences.
+Choose **Top Right** to move it below the navigation gizmo. Names wrap in narrow
+viewports, and placement avoids the open toolbar/sidebar. This display only
+reads the group: it does not change weights, selection, modes or saved UI.
+
 - Default: Strength 0.5, 5 iterations, selection neighbors only.
 - All weight influences are averaged together using mesh edges, then normalized
   on every iteration. Group/vertex processing order cannot bias the result.

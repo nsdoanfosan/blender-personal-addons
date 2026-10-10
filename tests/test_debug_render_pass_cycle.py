@@ -226,6 +226,21 @@ addon._set_mesh_ao_viewport_enabled(False)
 assert bpy.context.view_layer.material_override is None
 assert addon.apply_debug_hotkey(real_shading_context, "M") == "COMBINED"
 assert viewport_space.shading.render_pass == "COMBINED"
+# Regression: a Solid viewport can retain DIFFUSE_COLOR while displaying grey.
+# The first B must enter Base Color, rather than pass through or skip to Factor.
+for stale_pass in ("COMBINED", "DIFFUSE_COLOR", "NORMAL"):
+    viewport_space.shading.type = "SOLID"
+    viewport_space.shading.render_pass = stale_pass
+    assert addon.apply_debug_hotkey(real_shading_context, "M") is None
+    assert viewport_space.shading.type == "SOLID"
+    assert addon.apply_debug_hotkey(real_shading_context, "B") == "DIFFUSE_COLOR"
+    assert viewport_space.shading.type == "MATERIAL"
+    assert viewport_space.shading.render_pass == "DIFFUSE_COLOR"
+    assert addon.apply_debug_hotkey(real_shading_context, "M") == "COMBINED"
+viewport_space.shading.type = "WIREFRAME"
+assert addon.apply_debug_hotkey(real_shading_context, "B") is None
+assert viewport_space.shading.type == "WIREFRAME"
+viewport_space.shading.type = "MATERIAL"
 viewport_space.shading.render_pass = original_render_pass
 assert addon.apply_debug_view(real_shading_context, "ATTRIBUTE_WEIGHT_G") == "ATTRIBUTE_WEIGHT_G"
 

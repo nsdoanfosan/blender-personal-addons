@@ -1,9 +1,9 @@
 bl_info = {
     "name": "Debug Render Pass Cycle",
     "author": "PARK / OpenAI",
-    "version": (1, 5, 3),
+    "version": (1, 5, 4),
     "blender": (4, 0, 0),
-    "location": "3D Viewport (Material Preview / Rendered) > B / M; Sidebar > View",
+    "location": "3D Viewport > B (Base Color / Next) / M (Combined); Sidebar > View",
     "description": "Cycle Unreal-style debug render passes without changing materials",
     "category": "3D View",
 }
@@ -703,6 +703,21 @@ def apply_adjacent_debug_view(context, step):
 
 def apply_debug_hotkey(context, key):
     """Apply one supported bare-key action, or return None to pass it through."""
+    # A viewport saved/switched to Solid must still be able to enter Base Color.
+    # Reset the pass explicitly: Solid can retain a stale DIFFUSE_COLOR (or other
+    # debug pass), which would otherwise make the first B skip Base Color.
+    space = getattr(context, "space_data", None)
+    if (key == "B" and context.area is not None
+            and context.area.type == "VIEW_3D" and space is not None
+            and space.type == "VIEW_3D" and space.shading.type == "SOLID"):
+        original_pass = space.shading.render_pass
+        space.shading.type = "MATERIAL"
+        target = apply_debug_view(context, "DIFFUSE_COLOR")
+        if target is None:
+            space.shading.render_pass = original_pass
+            space.shading.type = "SOLID"
+        return target
+
     if not viewport_supports_debug_passes(context):
         return None
 
@@ -896,7 +911,7 @@ class DEBUGRENDERPASS_PT_view3d(bpy.types.Panel):
         is_usable = is_material or (is_rendered and engine_supported)
 
         if not is_material and not is_rendered:
-            layout.label(text="Use Material Preview or Rendered view", icon="INFO")
+            layout.label(text="Press B in Solid view for Base Color", icon="INFO")
         elif is_rendered and not engine_supported:
             layout.label(text="This engine has no viewport debug passes", icon="INFO")
 
@@ -920,7 +935,7 @@ class DEBUGRENDERPASS_PT_view3d(bpy.types.Panel):
             column.label(text="Missing ChaosWeight = 0", icon="INFO")
 
         layout.separator()
-        layout.label(text="B/M override in Material Preview / Rendered")
+        layout.label(text="B: Base Color from Solid; cycle in Preview")
 
 
 classes = (

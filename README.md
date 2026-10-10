@@ -41,6 +41,8 @@ the repository source therefore updates the deployed add-on immediately.
 In Material Preview or Eevee Rendered view, press **B** to cycle debug views
 and **M** to return to Combined. The attribute views are **Factor → Random →
 Mesh AO → Weight G (Chaos Cloth)**, followed by the standard render passes.
+From Solid view, the first **B** switches to Material Preview and shows Base Color,
+even when a different debug pass was retained. Further presses cycle normally.
 **N > View > Debug Render Pass > Weight G (Chaos Cloth)** also opens it directly.
 
 Weight G displays Hair Tool Unreal Bridge's live `ChaosWeight` source:

@@ -95,6 +95,9 @@ assert ext[0] > 7.0, ext                      # unrolled length ~ curve length
 assert ext[2] < ext[1] * 0.5, ext             # flat: thickness axis much thinner than width
 assert len(straight_obj.data.uv_layers) >= 1
 assert straight_obj.modifiers[0].type == 'CURVE'
+assert straight_obj.name.endswith('_low'), straight_obj.name
+assert straight_obj.parent == bpy.data.objects[c['curve']]
+assert straight_obj.parent.parent == ribbon
 
 # 2) closed ring tube -> cyclic detected
 ring_pts = [(math.cos(a) * 3, math.sin(a) * 3, math.sin(2 * a) * 0.4) for a in [i * math.tau / 8 for i in range(8)]]
@@ -160,6 +163,68 @@ pid = many.attributes.new("cloth_path_id", 'INT', 'POINT')
 many_obj = bpy.data.objects.new("ManyIslands", many); scene.collection.objects.link(many_obj)
 rep = run_unbend(many_obj, split_mode='ATTRIBUTE', max_islands=4)
 assert len(rep["created"]) == 1 and "largest island" in rep["created"][0]["note"], rep
+
+# 6) explicit attribute mode must not silently fall back to mesh islands.
+before_ids = {o.as_pointer() for o in bpy.data.objects}
+before_collections = {c.as_pointer() for c in bpy.data.collections}
+try:
+    run_unbend(ribbon, split_mode='ATTRIBUTE')
+except ValueError as exc:
+    assert 'cloth_path_id' in str(exc)
+else:
+    raise AssertionError('Missing path attributes must cancel explicit ATTRIBUTE mode')
+assert before_ids == {o.as_pointer() for o in bpy.data.objects}
+assert before_collections == {c.as_pointer() for c in bpy.data.collections}
+
+# 7) terminal role names survive duplicate source labels and repeat generation.
+ribbon.name = 'Ribbon_low.009'
+rep = run_unbend(ribbon, output_base_name='Ribbon_low.009')
+assert rep['created'][0]['mesh'] == 'Ribbon_part_00_low', rep
+rep2 = run_unbend(ribbon, output_base_name='Ribbon_low.009')
+assert rep2['created'][0]['mesh'] == 'Ribbon_02_part_00_low', rep2
+
+# 8) a failure after curve creation cleans every generated ID and collection.
+before_ids = {o.as_pointer() for o in bpy.data.objects}
+before_meshes = {m.as_pointer() for m in bpy.data.meshes}
+before_curves = {c.as_pointer() for c in bpy.data.curves}
+before_collections = {c.as_pointer() for c in bpy.data.collections}
+original_unbend = unb._unbend_coords
+def fail_unbend(*args, **kwargs):
+    raise RuntimeError('injected frame failure')
+unb._unbend_coords = fail_unbend
+try:
+    try:
+        run_unbend(ribbon)
+    except RuntimeError as exc:
+        assert 'injected frame failure' in str(exc)
+    else:
+        raise AssertionError('Expected frame failure')
+finally:
+    unb._unbend_coords = original_unbend
+assert before_ids == {o.as_pointer() for o in bpy.data.objects}
+assert before_meshes == {m.as_pointer() for m in bpy.data.meshes}
+assert before_curves == {c.as_pointer() for c in bpy.data.curves}
+assert before_collections == {c.as_pointer() for c in bpy.data.collections}
+
+# 9) scaled/rotated parents keep world geometry and report real millimetres.
+ribbon.location = (3, -2, 1)
+ribbon.rotation_euler = (0.2, 0.3, -0.4)
+ribbon.scale = (2, 0.8, 1.3)
+bpy.context.view_layer.update()
+rep = run_unbend(ribbon)
+c = rep['created'][0]
+low = bpy.data.objects[c['mesh']]
+assert np.allclose(np.array(low.matrix_world), np.array(ribbon.matrix_world), atol=1e-6)
+assert max(low['_ta_unbend_roundtrip_mm']) > 0
+ev = low.evaluated_get(bpy.context.evaluated_depsgraph_get())
+mesh = ev.to_mesh()
+try:
+    delta = unb._mesh_positions(mesh) - unb._mesh_positions(ribbon.data)
+finally:
+    ev.to_mesh_clear()
+world_error = np.linalg.norm(delta @ np.array(ribbon.matrix_world.to_3x3()).T, axis=1)
+expected_mm = np.array([np.percentile(world_error, 50), np.percentile(world_error, 95), world_error.max()]) * 1000
+assert np.allclose(np.array(low['_ta_unbend_roundtrip_mm']), expected_mm, rtol=1e-5, atol=1e-5)
 
 addon_utils.disable(MODULE, default_set=False)
 print("TA_TOOLS_CURVE_UNBEND_OK")

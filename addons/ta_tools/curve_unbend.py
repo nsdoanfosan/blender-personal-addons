@@ -17,11 +17,12 @@ Part sources:
 
 import heapq
 import math
+import re
 
 import bmesh
 import bpy
 import numpy as np
-from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 from mathutils import Vector
 
 from . import curve_fit_plane as cfp
@@ -574,6 +575,8 @@ def _parts(mesh, split_mode, max_islands):
     count = len(mesh.vertices)
     edges = _mesh_edges(mesh)
     pid = _point_attr(mesh, "cloth_path_id", 1, np.int64)
+    if split_mode == 'ATTRIBUTE' and pid is None:
+        raise ValueError("Path Attribute requires a POINT cloth_path_id attribute")
     parts = []
     if pid is not None and split_mode in {'AUTO', 'ATTRIBUTE'}:
         for k in np.unique(pid):
@@ -586,24 +589,50 @@ def _parts(mesh, split_mode, max_islands):
     return parts, edges
 
 
+def _output_base_name(name):
+    """Keep Painter's role token terminal, rather than inheriting _low.009."""
+    name = re.sub(r"\.\d{3,}$", "", name.strip())
+    name = re.sub(r"_(?:low|high)$", "", name, flags=re.IGNORECASE)
+    if not name:
+        raise ValueError("Output base name cannot be empty")
+    return name
+
+
+def _output_namespace(name, parts):
+    base = _output_base_name(name)
+    candidate, index = base, 2
+    while (bpy.data.collections.get(f"{candidate} · Unbend") is not None
+           or any(bpy.data.objects.get(f"{candidate}_{part}_{role}") is not None
+                  for part, _mask in parts for role in ('curve', 'low'))):
+        candidate = f"{base}_{index:02d}"
+        index += 1
+    return candidate
+
+
+def _parent_preserving_world(obj, parent):
+    world = obj.matrix_world.copy()
+    obj.parent = parent
+    obj.matrix_parent_inverse = parent.matrix_world.inverted()
+    obj.matrix_world = world
+
+
 def unbend_object(context, obj, control_points=12, samples=128, fit_tilt=True,
                   split_mode='AUTO', max_islands=4, max_part_vertices=1000000,
-                  generate_uv=True, hide_source=False):
+                  generate_uv=True, hide_source=False, output_base_name=None):
     if obj.type not in {'MESH', 'CURVE'}:
         raise ValueError("Select a mesh, or a curve that generates a mesh")
     depsgraph = context.evaluated_depsgraph_get()
     source = bpy.data.meshes.new_from_object(obj.evaluated_get(depsgraph), depsgraph=depsgraph,
                                              preserve_all_data_layers=True)
-    collection_name = f"{obj.name} · Unbend"
-    collection = bpy.data.collections.get(collection_name)
-    if collection is None:
-        collection = bpy.data.collections.new(collection_name)
-        parent = obj.users_collection[0] if obj.users_collection else context.scene.collection
-        parent.children.link(collection)
-
+    collection = None
+    generated = []
     report = {"created": [], "skipped": []}
     try:
         parts, all_edges = _parts(source, split_mode, max_islands)
+        base = _output_namespace(output_base_name or obj.name, parts)
+        collection = bpy.data.collections.new(f"{base} · Unbend")
+        parent = obj.users_collection[0] if obj.users_collection else context.scene.collection
+        parent.children.link(collection)
         has_attrs = all(_point_attr(source, n, c) is not None for n, c in
                         (("cloth_path_u", 1), ("cloth_path_center", 3)))
         for part_name, mask in parts:
@@ -623,7 +652,7 @@ def unbend_object(context, obj, control_points=12, samples=128, fit_tilt=True,
             if nverts > max_part_vertices:
                 report["skipped"].append((part_name, f"{nverts} verts > limit {max_part_vertices}"))
                 continue
-            pmesh = _part_mesh(source, mask, f"{obj.name}_{part_name}_unbend")
+            pmesh = _part_mesh(source, mask, f"{base}_{part_name}_low")
             try:
                 pos = _mesh_positions(pmesh)
                 pedges = _mesh_edges(pmesh)
@@ -639,8 +668,10 @@ def unbend_object(context, obj, control_points=12, samples=128, fit_tilt=True,
                     line, cyclic, expected = _centerline_from_geodesic(pos, pedges, bands, len(pmesh.polygons))
                     method = "geodesic"
                 line = _smooth(line, 2, cyclic)
-                curve = _make_curve(f"{obj.name}_{part_name}_curve", line, cyclic,
+                curve = _make_curve(f"{base}_{part_name}_curve", line, cyclic,
                                     max(3 if cyclic else 2, control_points), obj.matrix_world, collection)
+                generated.append(curve)
+                _parent_preserving_world(curve, obj)
                 length = _curve_length(curve)
                 tilt_score = None
                 if fit_tilt:
@@ -660,9 +691,12 @@ def unbend_object(context, obj, control_points=12, samples=128, fit_tilt=True,
                     uvs = np.column_stack([(straight[lv, 0] - straight[:, 0].min()) / span,
                                            (straight[lv, 1] - straight[:, 1].min()) / span])
                     uv.data.foreach_set("uv", uvs.astype(np.float32).ravel())
-                mobj = bpy.data.objects.new(f"{obj.name}_{part_name}_unbend", pmesh)
+                mobj = bpy.data.objects.new(f"{base}_{part_name}_low", pmesh)
                 mobj.matrix_world = obj.matrix_world.copy()
                 collection.objects.link(mobj)
+                generated.append(mobj)
+                pmesh = None  # the object owns the mesh, including on failure
+                _parent_preserving_world(mobj, curve)
                 mod = mobj.modifiers.new("Follow Curve", 'CURVE')
                 mod.object = curve
                 mod.deform_axis = 'POS_X'
@@ -672,7 +706,6 @@ def unbend_object(context, obj, control_points=12, samples=128, fit_tilt=True,
                 mobj[cfp._FIT_SHAPE_CYCLIC] = bool(cyclic)
                 mobj[cfp._FIT_SHAPE_LENGTH] = length
                 mobj[_UNBEND_MARKER] = obj.name
-                pmesh = None
                 # round trip
                 context.view_layer.update()
                 ev = mobj.evaluated_get(context.evaluated_depsgraph_get())
@@ -682,7 +715,11 @@ def unbend_object(context, obj, control_points=12, samples=128, fit_tilt=True,
                 err = np.linalg.norm(back - pos[src_index], axis=1)
                 size = float(np.linalg.norm(np.ptp(pos, axis=0)))
                 stats = [float(np.percentile(err, 50)), float(np.percentile(err, 95)), float(err.max())]
-                mobj[_UNBEND_ERROR] = [x * 1000.0 for x in stats]
+                world_delta = (back - pos[src_index]) @ np.array(obj.matrix_world.to_3x3()).T
+                world_err = np.linalg.norm(world_delta, axis=1) * context.scene.unit_settings.scale_length
+                mobj[_UNBEND_ERROR] = [float(np.percentile(world_err, 50)) * 1000.0,
+                                       float(np.percentile(world_err, 95)) * 1000.0,
+                                       float(world_err.max()) * 1000.0]
                 report["created"].append({
                     "part": part_name, "mesh": mobj.name, "curve": curve.name, "method": method,
                     "cyclic": bool(cyclic), "verts": len(back), "length": length,
@@ -691,8 +728,20 @@ def unbend_object(context, obj, control_points=12, samples=128, fit_tilt=True,
             finally:
                 if pmesh is not None:
                     bpy.data.meshes.remove(pmesh)
+    except Exception:
+        for generated_obj in reversed(generated):
+            data = generated_obj.data
+            kind = generated_obj.type
+            bpy.data.objects.remove(generated_obj, do_unlink=True)
+            if data.users == 0:
+                (bpy.data.meshes if kind == 'MESH' else bpy.data.curves).remove(data)
+        if collection is not None:
+            bpy.data.collections.remove(collection)
+        raise
     finally:
         bpy.data.meshes.remove(source)
+    if not report['created'] and collection is not None:
+        bpy.data.collections.remove(collection)
     if hide_source and report["created"]:
         obj.hide_set(True)
     return report
@@ -721,6 +770,8 @@ class TA_OT_unbend_mesh_to_curve(bpy.types.Operator):
                              description="Parts with more islands keep only their largest island")
     max_part_vertices: IntProperty(name="Max Part Vertices", default=1000000, min=100)
     hide_source: BoolProperty(name="Hide Source", default=False)
+    output_base_name: StringProperty(name="Output Base Name", default="",
+                                     description="Blank uses the source name without its Low/High suffix")
 
     @classmethod
     def poll(cls, context):
@@ -732,7 +783,7 @@ class TA_OT_unbend_mesh_to_curve(bpy.types.Operator):
         try:
             report = unbend_object(context, obj, self.control_points, self.samples, self.fit_tilt,
                                    self.split_mode, self.max_islands, self.max_part_vertices,
-                                   True, self.hide_source)
+                                   True, self.hide_source, self.output_base_name or None)
         except ValueError as exc:
             self.report({'WARNING'}, str(exc))
             return {'CANCELLED'}

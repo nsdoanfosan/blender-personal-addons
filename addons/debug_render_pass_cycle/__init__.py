@@ -14,6 +14,7 @@ from bpy.app.handlers import persistent
 from bpy.props import EnumProperty, StringProperty
 from . import weight_visibility
 from . import runtime_refs
+from . import hair_base_color
 
 
 OPERATOR_CYCLE_ID = "view3d.cycle_debug_render_pass"
@@ -519,6 +520,7 @@ def _draw_weight_batches(shader, objects, projection_matrix, show_wire=True):
 
 
 def _restore_material_overrides():
+    hair_base_color.restore()
     weight_visibility.restore()
     _set_weight_overlay_enabled(False)
     for state in tuple(_material_override_states.values()):
@@ -678,6 +680,7 @@ def apply_debug_view(context, view_id):
     except (TypeError, ValueError):
         return None
     _set_mesh_ao_viewport_enabled(False)
+    hair_base_color.sync()
     context.area.tag_redraw()
     return view_id
 
@@ -984,6 +987,8 @@ def _start_input_listeners():
     if not _listener_enabled:
         return None
 
+    hair_base_color.sync()
+
     window_manager = bpy.context.window_manager
     if weight_visibility.active():
         weight_view_open = False
@@ -1060,6 +1065,11 @@ def _save_pre_remove_debug_materials(_unused):
     _remove_debug_materials()
 
 
+@persistent
+def _render_pre_restore_hair_albedo(_scene, *_unused):
+    hair_base_color.restore()
+
+
 def prepare_for_export():
     """End temporary viewport overrides before Send2UE collects visible sources."""
     _restore_material_overrides()
@@ -1085,6 +1095,8 @@ def register():
             handlers.append(_history_post_invalidate_runtime)
     if _save_pre_remove_debug_materials not in bpy.app.handlers.save_pre:
         bpy.app.handlers.save_pre.append(_save_pre_remove_debug_materials)
+    if _render_pre_restore_hair_albedo not in bpy.app.handlers.render_pre:
+        bpy.app.handlers.render_pre.append(_render_pre_restore_hair_albedo)
     _register_draw_handler()
     _schedule_input_listeners()
 
@@ -1110,6 +1122,8 @@ def unregister():
             handlers.remove(_history_post_invalidate_runtime)
     if _save_pre_remove_debug_materials in bpy.app.handlers.save_pre:
         bpy.app.handlers.save_pre.remove(_save_pre_remove_debug_materials)
+    if _render_pre_restore_hair_albedo in bpy.app.handlers.render_pre:
+        bpy.app.handlers.render_pre.remove(_render_pre_restore_hair_albedo)
 
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

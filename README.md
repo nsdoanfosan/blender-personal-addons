@@ -249,3 +249,9 @@ Registration runs in listed order and unregistration runs in reverse.
 The utilities do not share a common settings object. Scene properties are owned
 and registered by the module that uses them. Keep that separation when
 modifying one tool so unrelated tools can continue to register independently.
+
+### Hair Tool Base Color buffer
+
+The Base Color debug view uses the authored Bridge color stack while retaining the Hair Tool transparency mix and alpha mask. Its temporary diffuse closure is removed when leaving the view, saving, rendering or exporting.
+
+Regression: `blender --factory-startup --background --python-exit-code 1 --python tests/blender_hair_base_color_alpha.py` (no preferences saved).

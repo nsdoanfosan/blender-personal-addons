@@ -19,6 +19,7 @@ from . import ta_tool
 from . import face_sets_to_materials
 from . import quick_menu
 from . import viewport_wire_overlay
+from . import mcp_server
 
 
 modules = (
@@ -33,6 +34,7 @@ modules = (
     face_sets_to_materials,
     quick_menu,
     viewport_wire_overlay,
+    mcp_server,
 )
 
 

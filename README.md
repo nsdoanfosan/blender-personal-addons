@@ -90,6 +90,15 @@ Two utilities intentionally live elsewhere:
 
 Blender 4.0 or newer is required.
 
+### MCP Server Search
+
+Press **F3**, type **mcp**, and choose **MCP: Start Server** to start the
+installed Blender MCP bridge for the current Blender instance. The MCP add-on
+must be enabled. It is also in **Window > MCP: Start Server**, so normal F3
+menu search finds it without Developer Extras. If its server is already running,
+the command reports that without starting another server. It uses the bridge's existing host, port and
+online-access settings and does not save user preferences.
+
 ### Collection FBX Exporter
 
 Exports each direct child of the active collection to a separate FBX file.

@@ -265,6 +265,27 @@ class BlenderTests(unittest.TestCase):
         bpy.ops.object.mode_set(mode='OBJECT')
         np.testing.assert_allclose(self.values(self.mesh.color_attributes['QA_Color'])[:, 0], 0.)
 
+    def test_green_channel_updates_evaluated_preview_in_edit_mode(self):
+        for domain in ('POINT', 'CORNER'):
+            for dtype in ('FLOAT_COLOR', 'BYTE_COLOR'):
+                with self.subTest(domain=domain, dtype=dtype):
+                    attr = self.attribute(domain, dtype)
+                    vertices = list(range(6)) if domain == 'POINT' else [l.vertex_index for l in self.mesh.loops]
+                    for i, item in enumerate(attr.data):
+                        item.color = (.1, 1. if vertices[i] in {1, 4} else 0., .3, .7)
+                    bpy.ops.object.mode_set(mode='EDIT')
+                    self.assertEqual(bpy.ops.mesh.vertex_color_smooth_selected(channels='G'), {'FINISHED'})
+                    bpy.context.view_layer.update()
+                    # Capture preview before exiting Edit Mode: a mode change
+                    # would synchronize CustomData and conceal the original bug.
+                    arrays = vcs.viewport.preview_arrays(bpy.context)
+                    bpy.ops.object.mode_set(mode='OBJECT')
+                    actual = self.values(self.mesh.color_attributes['QA_Color'])
+                    np.testing.assert_allclose(arrays['colors'], actual, atol=1e-6)
+                    selected = np.array([v in {1, 4} for v in vertices])
+                    np.testing.assert_allclose(actual[selected, 1], 2 / 3, atol=.008)
+                    self.mesh.color_attributes.remove(self.mesh.color_attributes['QA_Color'])
+
     def test_keymaps_unregister_reregister(self):
         vcs.unregister()
         vcs.register()

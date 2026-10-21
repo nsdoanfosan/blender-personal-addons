@@ -5,7 +5,7 @@ import bmesh
 import blf
 import numpy as np
 from bpy.app.handlers import persistent
-from .core import isolate_rgb
+from .core import isolate_rgb, srgb_to_linear
 
 view_backups = {}
 last_error = ''
@@ -108,6 +108,29 @@ def preview_arrays(context):
         colors = np.empty(len(attr.data) * 4, dtype=np.float32)
         attr.data.foreach_get('color', colors)
         colors = colors.reshape((-1, 4))
+        edit_bm = None
+        edit_faces = None
+        if obj.mode == 'EDIT':
+            edit_bm = bmesh.from_edit_mesh(obj.data)
+            edit_bm.verts.index_update()
+            edit_faces = list(edit_bm.faces)
+            edit_loops = [loop for face in edit_faces for loop in face.loops]
+            # Evaluated Mesh CustomData can remain stale while BMesh values have
+            # already changed. Read the authoritative edit layer without flushing
+            # production data or leaving Edit Mode. Keep evaluated positions.
+            same_topology = (len(edit_bm.verts) == len(mesh.vertices)
+                and len(edit_faces) == len(mesh.polygons)
+                and len(edit_loops) == len(mesh.loops)
+                and all(loop.vert.index == mesh.loops[i].vertex_index
+                        for i, loop in enumerate(edit_loops)))
+            if same_topology:
+                layers = edit_bm.verts.layers if attr.domain == 'POINT' else edit_bm.loops.layers
+                layer = (layers.float_color if attr.data_type == 'FLOAT_COLOR' else layers.color).get(name)
+                if layer is not None:
+                    elements = list(edit_bm.verts) if attr.domain == 'POINT' else edit_loops
+                    colors = np.array([tuple(element[layer]) for element in elements], dtype=np.float32)
+                    if attr.data_type == 'BYTE_COLOR':
+                        colors[:, :3] = srgb_to_linear(colors[:, :3])
         triangle_vertices = []
         triangle_samples = []
         for tri in mesh.loop_triangles:
@@ -120,11 +143,9 @@ def preview_arrays(context):
         # Selection flags of the evaluated surface can lag behind Edit Mode.
         selected = [v.select for v in mesh.vertices]
         hidden = [v.hide for v in mesh.vertices]
-        if obj.mode == 'EDIT':
-            bm = bmesh.from_edit_mesh(obj.data)
-            if len(bm.verts) == len(mesh.vertices):
-                selected = [v.select for v in bm.verts]
-                hidden = [v.hide for v in bm.verts]
+        if edit_bm is not None and len(edit_bm.verts) == len(mesh.vertices):
+            selected = [v.select for v in edit_bm.verts]
+            hidden = [v.hide for v in edit_bm.verts]
         edges = [(tuple(e.vertices), e.select) for e in mesh.edges
                  if not e.hide and not any(hidden[v] for v in e.vertices)]
         return {'positions': positions, 'colors': colors,

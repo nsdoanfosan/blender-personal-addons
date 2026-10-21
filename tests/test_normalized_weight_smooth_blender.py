@@ -288,15 +288,11 @@ class BlenderTests(unittest.TestCase):
     def test_registration_reload_and_shortcuts(self):
         module = self.module
         keys = module._keymaps
-        self.assertEqual(len(keys), 2)
-        for km, k in keys:
-            self.assertEqual(k.type, 'E')
-            self.assertTrue(k.ctrl and k.shift)
-            self.assertFalse(k.alt)
+        self.assertEqual(len(keys), 0)
         module.unregister()
         importlib.reload(module)
         module.register()
-        self.assertEqual(len(module._keymaps), 2)
+        self.assertEqual(len(module._keymaps), 0)
 
     def test_handy_panel_attachment(self):
         icons = bpy.types.UILayout.bl_rna.functions['label'].parameters['icon'].enum_items.keys()

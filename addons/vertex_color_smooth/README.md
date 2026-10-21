@@ -44,8 +44,10 @@ markers remain visible. The preview applies to the active mesh.
 | **F9** | Adjust the last data operation |
 | **Ctrl+Z** | Undo a data operation |
 
-There is **no Ctrl+Shift+E binding**. Original weight shortcuts and settings are
-unchanged. Mode-specific color keymaps take precedence in Attribute view, even
+There is **no Ctrl+Shift+E binding**. PARK's old all-weight smoothing companion
+was removed from the installed add-ons, and its automatic hotkey was removed
+from its source. **Ctrl+Shift+E remains Vertex Connect.** The original Handy
+Weight Edit settings are unchanged. Color keymaps take precedence in Attribute view, even
 if Handy's weight toggle remains on.
 
 Main increment defaults to **0.1**, micro to **0.01**. Fill references the
@@ -84,8 +86,9 @@ versions have not been tested on this workstation.
 
 ## Validation
 
-17 tests cover color types/domains, masks, hidden/unselected preservation,
-channel isolation, fill/gradient/copy, viewport gates, keymaps, weights and shapes:
+18 tests cover color types/domains, masks, hidden/unselected preservation,
+channel isolation, fill/gradient/copy, live Edit Mode preview updates,
+viewport gates, keymaps, weights and shapes:
 
 ```powershell
 & 'C:\Program Files\Blender Foundation\Blender 5.2\blender.exe' --factory-startup --background --python 'C:\Users\PARK\Documents\GitHub\blender-personal-addons\tests\test_vertex_color_smooth.py'

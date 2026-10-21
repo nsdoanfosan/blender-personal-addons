@@ -4,12 +4,17 @@ Handy Weight Edit companion for Blender 4.2+ (verified in 5.2.2 LTS).
 Installed from this package through the Blender 5.2 `scripts/addons` junction.
 No changes to Handy's original source or its Shift+E key binding.
 
-Select mesh vertices in Edit Mode and press **Ctrl+Shift+E**, or use **Smooth All
-Selected Weights** at the bottom of Handy Weight Edit's panel (currently Skinning).
+Retired from PARK's installed add-ons on 2026-10-21. Automatic hotkeys were
+removed so **Ctrl+Shift+E** remains available to the existing Vertex Connect.
+The source is retained as history; the installed add-on was disabled and its
+junction removed.
+
+If explicitly re-enabled, use **Smooth All Selected Weights** at the bottom of
+Handy Weight Edit's panel (currently Skinning), or find it with F3.
 The tool follows Handy's tab customization; if Handy is disabled it has its own
 Skinning panel. **F9** changes Strength, Iterations, group scope and boundary sampling
 for the last operation; **Ctrl+Z** undoes the complete operation.
-Panel settings are defaults for subsequent shortcut invocations.
+Panel settings are defaults for subsequent invocations.
 
 ## Handy active vertex group label
 

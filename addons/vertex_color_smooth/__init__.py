@@ -3,7 +3,7 @@
 bl_info = {
     "name": "Handy Vertex Color Edit",
     "author": "PARK / Codex",
-    "version": (2, 0, 0),
+    "version": (2, 0, 1),
     "blender": (4, 2, 0),
     "location": "3D View > Color > Handy Vertex Color Edit",
     "description": "Handy-style fill, gradient, smooth and RGB channel views for vertex colors",

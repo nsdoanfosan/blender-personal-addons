@@ -287,12 +287,72 @@ class BlenderTests(unittest.TestCase):
 
     def test_registration_reload_and_shortcuts(self):
         module = self.module
-        keys = module._keymaps
-        self.assertEqual(len(keys), 0)
+        def check_keys():
+            self.assertEqual({km.name for km, _ in module._keymaps}, {'Mesh', 'Weight Paint'})
+            self.assertEqual(len(module._keymaps), 2)
+            for km, key in module._keymaps:
+                self.assertEqual(key.idname, 'mesh.handy_normalized_weight_smooth')
+                self.assertEqual((key.type, key.value), ('E', 'PRESS'))
+                self.assertTrue(key.ctrl and key.shift and key.alt)
+                self.assertFalse(key.any or key.oskey)
+                self.assertTrue(key.active)
+        check_keys()
         module.unregister()
+        self.assertEqual(len(module._keymaps), 0)
         importlib.reload(module)
         module.register()
-        self.assertEqual(len(module._keymaps), 0)
+        check_keys()
+
+    def test_handy_shortcut_requires_toggle_and_editable_weights(self):
+        bpy.ops.object.mode_set(mode='EDIT')
+        context = SimpleNamespace(object=self.obj, scene=SimpleNamespace())
+        poll = self.module.NWS_OT_handy_smooth.poll
+        self.assertFalse(poll(context))
+        context.scene.handy_weight_edit_props = SimpleNamespace(toggle_vertex_weight=False)
+        self.assertFalse(poll(context))
+        context.scene.handy_weight_edit_props.toggle_vertex_weight = True
+        self.assertTrue(poll(context))
+        bpy.ops.object.mode_set(mode='OBJECT')
+        self.assertFalse(poll(context))
+
+    def test_handy_shortcut_runs_smoothing_with_preferences(self):
+        class TestHandyProps(bpy.types.PropertyGroup):
+            toggle_vertex_weight: bpy.props.BoolProperty(default=False)
+        bpy.utils.register_class(TestHandyProps)
+        bpy.types.Scene.handy_weight_edit_props = bpy.props.PointerProperty(type=TestHandyProps)
+        # default_set=False intentionally leaves no persistent preference entry.
+        entry = bpy.context.preferences.addons.new()
+        entry.module = 'normalized_weight_smooth'
+        try:
+            self.armature()
+            bpy.ops.object.mode_set(mode='EDIT')
+            bm = bmesh.from_edit_mesh(self.mesh)
+            for vertex in bm.verts:
+                vertex.select_set(vertex.index in (0, 1))
+            bmesh.update_edit_mesh(self.mesh, loop_triangles=False, destructive=False)
+            before = self.edit_rows()
+            self.assertFalse(bpy.ops.mesh.handy_normalized_weight_smooth.poll())
+            self.assertEqual(self.edit_rows(), before)
+            bpy.context.scene.handy_weight_edit_props.toggle_vertex_weight = True
+            prefs = bpy.context.preferences.addons['normalized_weight_smooth'].preferences
+            settings = (prefs.factor, prefs.iterations, prefs.group_scope)
+            prefs.factor, prefs.iterations, prefs.group_scope = 0.5, 1, 'AUTO'
+            try:
+                self.assertEqual(bpy.ops.mesh.handy_normalized_weight_smooth(), {'FINISHED'})
+            finally:
+                prefs.factor, prefs.iterations, prefs.group_scope = settings
+            after = self.edit_rows()
+            self.assertAlmostEqual(after[0][0], 0.5)
+            self.assertAlmostEqual(after[0][1], 0.5)
+            for index in (0, 1):
+                self.assertAlmostEqual(sum(w for g, w in after[index].items() if g != 3), 1.0)
+                self.assertEqual(after[index][3], before[index][3])
+            for index in (2, 3):
+                self.assertEqual(after[index], before[index])
+        finally:
+            bpy.context.preferences.addons.remove(entry)
+            del bpy.types.Scene.handy_weight_edit_props
+            bpy.utils.unregister_class(TestHandyProps)
 
     def test_handy_panel_attachment(self):
         icons = bpy.types.UILayout.bl_rna.functions['label'].parameters['icon'].enum_items.keys()

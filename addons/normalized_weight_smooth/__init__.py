@@ -3,7 +3,7 @@
 bl_info = {
     "name": "Selected All Weights Smooth",
     "author": "PARK / Codex",
-    "version": (1, 1, 1),
+    "version": (1, 2, 0),
     "blender": (4, 2, 0),
     "location": "3D View > Skinning > Handy Weight Edit",
     "description": "Smooth all selected skin influences together, with total weight 1",
@@ -55,7 +55,7 @@ class NWS_Preferences(bpy.types.AddonPreferences):
     ])
 
     def draw(self, context):
-        self.layout.label(text="Select vertices, then use Smooth All Selected Weights.")
+        self.layout.label(text="Handy Vertex Weight Toggle on: Ctrl+Shift+Alt+E.")
         self.layout.label(text="Weight Paint: enable vertex or face selection masking.")
         for prop in ('factor', 'iterations', 'use_outside', 'group_scope',
                      'show_group_hud', 'group_hud_corner'):
@@ -177,6 +177,25 @@ class NWS_OT_smooth(bpy.types.Operator):
                 bm.free()
 
 
+class NWS_OT_handy_smooth(bpy.types.Operator):
+    bl_idname = "mesh.handy_normalized_weight_smooth"
+    bl_label = "Smooth All Selected Weights (Handy)"
+    bl_description = "With Handy's Vertex Weight Toggle on, smooth all selected bone weights"
+    bl_options = {'INTERNAL'}
+
+    @classmethod
+    def poll(cls, context):
+        handy = getattr(context.scene, 'handy_weight_edit_props', None)
+        if not handy or not handy.toggle_vertex_weight:
+            cls.poll_message_set("Enable Handy's Vertex Weight Toggle first")
+            return False
+        return NWS_OT_smooth.poll(context)
+
+    def execute(self, context):
+        # Keep the actual smoothing operator in F9/undo history with its settings.
+        return bpy.ops.mesh.normalized_weight_smooth('INVOKE_DEFAULT')
+
+
 def draw_tools(layout, context):
     addon = context.preferences.addons.get(__package__)
     if not addon:
@@ -184,6 +203,7 @@ def draw_tools(layout, context):
     prefs = addon.preferences
     box = layout.box()
     box.label(text="All Weights Smooth", icon='MOD_VERTEX_WEIGHT')
+    box.label(text="Handy toggle on: Ctrl+Shift+Alt+E")
     row = box.row(align=True)
     row.prop(prefs, 'factor')
     row.prop(prefs, 'iterations')
@@ -233,13 +253,19 @@ def _attach_handy():
     return 2.0  # Follow Handy enable/reload and any N-panel tab customization.
 
 
-_classes = (NWS_Preferences, NWS_OT_smooth, NWS_PT_panel)
+_classes = (NWS_Preferences, NWS_OT_smooth, NWS_OT_handy_smooth, NWS_PT_panel)
 
 
 def register():
     for cls in _classes:
         bpy.utils.register_class(cls)
-    # No automatic hotkey: Ctrl+Shift+E belongs to PARK's Vertex Connect.
+    kc = bpy.context.window_manager.keyconfigs.addon
+    if kc:
+        for name in ('Mesh', 'Weight Paint'):
+            km = kc.keymaps.new(name=name, space_type='EMPTY')
+            kmi = km.keymap_items.new(NWS_OT_handy_smooth.bl_idname, 'E', 'PRESS',
+                                     ctrl=True, shift=True, alt=True)
+            _keymaps.append((km, kmi))
     _attach_handy()
     bpy.app.timers.register(_attach_handy, first_interval=2.0, persistent=True)
     active_group_hud.register()
